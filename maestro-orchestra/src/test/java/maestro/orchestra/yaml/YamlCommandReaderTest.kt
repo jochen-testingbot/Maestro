@@ -42,6 +42,7 @@ import maestro.orchestra.ScrollCommand
 import maestro.orchestra.ScrollUntilVisibleCommand
 import maestro.orchestra.SetAirplaneModeCommand
 import maestro.orchestra.SetLocationCommand
+import maestro.orchestra.SetPermissionsCommand
 import maestro.orchestra.StartRecordingCommand
 import maestro.orchestra.StopAppCommand
 import maestro.orchestra.StopRecordingCommand
@@ -220,6 +221,10 @@ internal class YamlCommandReaderTest {
     fun labels(
         @YamlFile("023_labels.yaml") commands: List<Command>,
     ) {
+        // Compute expected absolute path for runScript command
+        val testResourcesPath = YamlCommandReaderTest::class.java.classLoader.getResource("YamlCommandReaderTest/023_runScript_test.js")?.toURI()
+        val expectedScriptPath = testResourcesPath?.let { java.nio.file.Paths.get(it).toString() } ?: "023_runScript_test.js"
+        
         assertThat(commands).containsExactly(
             ApplyConfigurationCommand(
                 config=MaestroConfig(
@@ -363,7 +368,7 @@ internal class YamlCommandReaderTest {
             RunScriptCommand(
                 script = "const myNumber = 1 + 1;",
                 condition = null,
-                sourceDescription = "023_runScript_test.js",
+                sourceDescription = expectedScriptPath,
                 label = "Run some special calculations"
             ),
             SetOrientationCommand(
@@ -758,6 +763,21 @@ internal class YamlCommandReaderTest {
 
         // Verify the original description includes both the point and double-tap info
         assertThat(tapCommand.originalDescription).isEqualTo("Double tap on \"Submit\" at 50%, 90%")
+    }
+
+    @Test
+    fun setPermissions(
+        @YamlFile("030_setPermissions.yaml") commands: List<Command>
+    ) {
+        assertThat(commands).containsExactly(
+            ApplyConfigurationCommand(MaestroConfig(
+                appId = "com.example.app",
+            )),
+            SetPermissionsCommand(
+                appId = "com.example.app",
+                permissions = mapOf("all" to "deny", "notifications" to "unset")
+            ),
+        )
     }
 
 

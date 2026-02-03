@@ -19,7 +19,6 @@
 
 package maestro.orchestra.yaml
 
-import com.fasterxml.jackson.annotation.JsonCreator
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.core.JsonLocation
 import maestro.DeviceOrientation
@@ -29,12 +28,14 @@ import maestro.TapRepeat
 import maestro.orchestra.AddMediaCommand
 import maestro.orchestra.AssertConditionCommand
 import maestro.orchestra.AssertNoDefectsWithAICommand
+import maestro.orchestra.AssertScreenshotCommand
 import maestro.orchestra.AssertWithAICommand
 import maestro.orchestra.BackPressCommand
 import maestro.orchestra.ClearKeychainCommand
 import maestro.orchestra.ClearStateCommand
 import maestro.orchestra.Condition
 import maestro.orchestra.CopyTextFromCommand
+import maestro.orchestra.SetClipboardCommand
 import maestro.orchestra.ElementSelector
 import maestro.orchestra.ElementTrait
 import maestro.orchestra.EraseTextCommand
@@ -60,6 +61,7 @@ import maestro.orchestra.ScrollUntilVisibleCommand
 import maestro.orchestra.SetAirplaneModeCommand
 import maestro.orchestra.SetLocationCommand
 import maestro.orchestra.SetOrientationCommand
+import maestro.orchestra.SetPermissionsCommand
 import maestro.orchestra.StartRecordingCommand
 import maestro.orchestra.StopAppCommand
 import maestro.orchestra.StopRecordingCommand
@@ -93,6 +95,7 @@ data class YamlFluentCommand(
     val assertNotVisible: YamlElementSelectorUnion? = null,
     val assertTrue: YamlAssertTrue? = null,
     val assertNoDefectsWithAI: YamlAssertNoDefectsWithAI? = null,
+    val assertScreenshot: YamlAssertScreenshot? = null,
     val assertWithAI: YamlAssertWithAI? = null,
     val extractTextWithAI: YamlExtractTextWithAI? = null,
     val back: YamlActionBack? = null,
@@ -109,6 +112,7 @@ data class YamlFluentCommand(
     val inputRandomCountryName: YamlInputRandomCountryName? = null,
     val inputRandomColorName: YamlInputRandomColorName? = null,
     val launchApp: YamlLaunchApp? = null,
+    val setPermissions: YamlSetPermissions? = null,
     val swipe: YamlSwipe? = null,
     val openLink: YamlOpenLink? = null,
     val openBrowser: String? = null,
@@ -125,6 +129,7 @@ data class YamlFluentCommand(
     val setOrientation: YamlSetOrientation? = null,
     val repeat: YamlRepeatCommand? = null,
     val copyTextFrom: YamlElementSelectorUnion? = null,
+    val setClipboard: YamlSetClipboard? = null,
     val runScript: YamlRunScript? = null,
     val waitForAnimationToEnd: YamlWaitForAnimationToEndCommand? = null,
     val evalScript: YamlEvalScript? = null,
@@ -151,6 +156,7 @@ data class YamlFluentCommand(
     private fun _toCommands(flowPath: Path, appId: String): List<MaestroCommand> {
         return when {
             launchApp != null -> listOf(launchApp(launchApp, appId))
+            setPermissions != null -> listOf(setPermissions(command = setPermissions, appId))
             tapOn != null -> listOf(tapCommand(tapOn))
             longPressOn != null -> listOf(tapCommand(longPressOn, longPress = true))
             assertVisible != null -> listOf(
@@ -219,6 +225,17 @@ data class YamlFluentCommand(
                 )
             )
 
+            assertScreenshot != null -> listOf(
+                MaestroCommand(
+                    AssertScreenshotCommand(
+                        path = assertScreenshot.path,
+                        thresholdPercentage = assertScreenshot.thresholdPercentage,
+                        cropOn = assertScreenshot.cropOn?.let { toElementSelector(it) },
+                        optional = assertScreenshot.optional,
+                        label = assertScreenshot.label
+                    )
+                )
+            )
             addMedia != null -> listOf(
                 MaestroCommand(
                     addMediaCommand = addMediaCommand(addMedia, flowPath)
@@ -302,7 +319,8 @@ data class YamlFluentCommand(
                     TakeScreenshotCommand(
                         path = takeScreenshot.path,
                         label = takeScreenshot.label,
-                        optional = takeScreenshot.optional
+                        optional = takeScreenshot.optional,
+                        cropOn = takeScreenshot.cropOn?.let { toElementSelector(selectorUnion = it) },
                     )
                 )
             )
@@ -369,19 +387,30 @@ data class YamlFluentCommand(
             )
 
             copyTextFrom != null -> listOf(copyTextFromCommand(copyTextFrom))
-            runScript != null -> listOf(
+            setClipboard != null -> listOf(
                 MaestroCommand(
-                    RunScriptCommand(
-                        script = resolvePath(flowPath, runScript.file)
-                            .readText(),
-                        env = runScript.env,
-                        sourceDescription = runScript.file,
-                        condition = runScript.`when`?.toCondition(),
-                        label = runScript.label,
-                        optional = runScript.optional,
+                    SetClipboardCommand(
+                        text = setClipboard.text,
+                        label = setClipboard.label,
+                        optional = setClipboard.optional
                     )
                 )
             )
+            runScript != null -> {
+                val scriptPath = resolvePath(flowPath, runScript.file)
+                listOf(
+                    MaestroCommand(
+                        RunScriptCommand(
+                            script = scriptPath.readText(),
+                            env = runScript.env,
+                            sourceDescription = scriptPath.toString(),
+                            condition = runScript.`when`?.toCondition(),
+                            label = runScript.label,
+                            optional = runScript.optional,
+                        )
+                    )
+                )
+            }
 
             waitForAnimationToEnd != null -> listOf(
                 MaestroCommand(
@@ -700,6 +729,17 @@ data class YamlFluentCommand(
                 stopApp = command.stopApp,
                 permissions = command.permissions,
                 launchArguments = command.arguments,
+                label = command.label,
+                optional = command.optional,
+            )
+        )
+    }
+
+    private fun setPermissions(command: YamlSetPermissions, appId: String): MaestroCommand {
+        return MaestroCommand(
+            SetPermissionsCommand(
+                appId = command.appId ?: appId,
+                permissions = command.permissions,
                 label = command.label,
                 optional = command.optional,
             )

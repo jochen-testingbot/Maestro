@@ -29,7 +29,7 @@ import org.openqa.selenium.chrome.ChromeDriverService
 import org.openqa.selenium.chrome.ChromeOptions
 import org.openqa.selenium.chromium.ChromiumDriverLogLevel
 import org.openqa.selenium.devtools.HasDevTools
-import org.openqa.selenium.devtools.v130.emulation.Emulation
+import org.openqa.selenium.devtools.v141.emulation.Emulation
 import org.openqa.selenium.interactions.Actions
 import org.openqa.selenium.interactions.PointerInput
 import org.openqa.selenium.interactions.Sequence
@@ -46,7 +46,8 @@ private const val SYNTHETIC_COORDINATE_SPACE_OFFSET = 100000
 
 class CdpWebDriver(
     val isStudio: Boolean,
-    private val isHeadless: Boolean = false
+    private val isHeadless: Boolean = false,
+    private val screenSize: String?
 ) : Driver {
 
     private lateinit var cdpClient: CdpClient
@@ -105,9 +106,24 @@ class CdpWebDriver(
                 addArguments("--remote-allow-origins=*")
                 addArguments("--disable-search-engine-choice-screen")
                 addArguments("--lang=en")
+
+                // Disable password management
+                addArguments("--password-store=basic")
+                val chromePrefs = hashMapOf<String, Any>(
+                    "credentials_enable_service" to false,
+                    "profile.password_manager_enabled" to false,
+                    "profile.password_manager_leak_detection" to false   // important one
+                )
+                setExperimentalOption("prefs", chromePrefs)
+
                 if (isHeadless) {
                     addArguments("--headless=new")
-                    addArguments("--window-size=1024,768")
+                    if(screenSize != null){
+                        addArguments("--window-size=" + screenSize.replace('x',','))
+                    }
+                    else{
+                        addArguments("--window-size=1024,768")
+                    }
                     setExperimentalOption("detach", true)
                 }
             }
@@ -490,7 +506,11 @@ class CdpWebDriver(
             Emulation.setGeolocationOverride(
                 Optional.of(latitude),
                 Optional.of(longitude),
-                Optional.of(0.0)
+                Optional.of(0.0),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty()
             )
         )
     }
@@ -594,7 +614,7 @@ class CdpWebDriver(
 }
 
 fun main() {
-    val driver = CdpWebDriver(isStudio = false)
+    val driver = CdpWebDriver(isStudio = false, isHeadless = false, screenSize = null)
     driver.open()
 
     try {

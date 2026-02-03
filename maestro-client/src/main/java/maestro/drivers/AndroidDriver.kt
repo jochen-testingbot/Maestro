@@ -26,6 +26,7 @@ import dadb.AdbShellResponse
 import dadb.AdbShellStream
 import dadb.Dadb
 import io.grpc.ManagedChannelBuilder
+import io.grpc.Metadata
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
 import maestro.*
@@ -64,6 +65,7 @@ class AndroidDriver(
     private val dadb: Dadb,
     hostPort: Int? = null,
     private var emulatorName: String = "",
+    private val reinstallDriver: Boolean = true,
     private val metricsProvider: Metrics = MetricsProvider.getInstance(),
     ) : Driver {
     private var portForwarder: AutoCloseable? = null
@@ -181,7 +183,12 @@ class AndroidDriver(
         LOGGER.info("[Done] close port forwarder")
 
         LOGGER.info("[Start] Uninstall driver from device")
-        uninstallMaestroApks()
+        if (reinstallDriver) {
+            uninstallMaestroDriverApp()
+        }
+        if (reinstallDriver) {
+            uninstallMaestroServerApp()
+        }
         LOGGER.info("[Done] Uninstall driver from device")
 
         LOGGER.info("[Start] Close instrumentation session")
@@ -926,9 +933,15 @@ class AndroidDriver(
 
     private fun setPermissionInternal(appId: String, permission: String, permissionValue: String) {
         try {
-            dadb.shell("pm $permissionValue $appId $permission")
+            shell("pm $permissionValue $appId $permission")
         } catch (exception: Exception) {
-            /* no-op */
+            // Ignore if it's something that the user doesn't have control over (e.g. you can't grant / deny INTERNET)
+            if (exception.message?.contains("is not a changeable permission type") == false) {
+                // Debug level is fine.
+                // We don't need to be loud about this. IOExceptions were already caught in shell(..)
+                // Remaining issues are likely due to "all" containing permissions that the app doesn't support.
+                logger.debug("Failed to set permission $permission for app $appId: ${exception.message}")
+            }
         }
     }
 
@@ -1059,6 +1072,14 @@ class AndroidDriver(
                 attributesBuilder["class"] = node.getAttribute("class")
             }
 
+            if (node.hasAttribute("important-for-accessibility")) {
+                attributesBuilder["important-for-accessibility"] = node.getAttribute("important-for-accessibility")
+            }
+
+            if (node.hasAttribute("error")) {
+                attributesBuilder["error"] = node.getAttribute("error")
+            }
+
             attributesBuilder
         } else {
             emptyMap()
@@ -1089,7 +1110,11 @@ class AndroidDriver(
 
     fun installMaestroDriverApp() {
         metrics.measured("operation", mapOf("command" to "installMaestroDriverApp")) {
-            uninstallMaestroDriverApp()
+            if (reinstallDriver) {
+                uninstallMaestroDriverApp()
+            } else if (isPackageInstalled("dev.mobile.maestro")) {
+                return@measured
+            }
 
             val maestroAppApk = File.createTempFile("maestro-app", ".apk")
 
@@ -1108,7 +1133,11 @@ class AndroidDriver(
     }
 
     private fun installMaestroServerApp() {
-        uninstallMaestroServerApp()
+        if (reinstallDriver) {
+            uninstallMaestroServerApp()
+        } else if (isPackageInstalled("dev.mobile.maestro.test")) {
+            return
+        }
 
         val maestroServerApk = File.createTempFile("maestro-server", ".apk")
 
@@ -1248,6 +1277,14 @@ class AndroidDriver(
                         throw throwable
                     }
                 }
+                Status.Code.INTERNAL -> {
+                    val trailers = Status.trailersFromThrowable(throwable)
+                    val errorType = trailers?.get(ERROR_TYPE_KEY)
+                    val errorMsg = trailers?.get(ERROR_MSG_KEY)
+                    val errorCause = trailers?.get(ERROR_CAUSE_KEY)
+                    LOGGER.error("Device call failed: type=$errorType, message=$errorMsg, cause=$errorCause", throwable)
+                    throw throwable.cause ?: throwable
+                }
                 else -> {
                     LOGGER.error("Unexpected error: ${status.code} - ${throwable.message} and cause ${throwable.cause} while doing android device call", throwable)
                     throw throwable
@@ -1264,6 +1301,13 @@ class AndroidDriver(
         private const val WINDOW_UPDATE_TIMEOUT_MS = 750
 
         private val REGEX_OPTIONS = setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL, RegexOption.MULTILINE)
+
+        private val ERROR_TYPE_KEY: Metadata.Key<String> =
+            Metadata.Key.of("error-type", Metadata.ASCII_STRING_MARSHALLER)
+        private val ERROR_MSG_KEY: Metadata.Key<String> =
+            Metadata.Key.of("error-message", Metadata.ASCII_STRING_MARSHALLER)
+        private val ERROR_CAUSE_KEY: Metadata.Key<String> =
+            Metadata.Key.of("error-cause", Metadata.ASCII_STRING_MARSHALLER)
 
         private val LOGGER = LoggerFactory.getLogger(AndroidDriver::class.java)
 

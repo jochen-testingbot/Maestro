@@ -267,6 +267,23 @@ data class CopyTextFromCommand(
     }
 }
 
+data class SetClipboardCommand(
+    val text: String,
+    override val label: String? = null,
+    override val optional: Boolean = false,
+) : Command {
+
+    override val originalDescription: String
+        get() = "Set Maestro clipboard to $text"
+
+    override fun evaluateScripts(jsEngine: JsEngine): SetClipboardCommand {
+        return copy(
+            text = text.evaluateScripts(jsEngine),
+            label = label?.evaluateScripts(jsEngine)
+        )
+    }
+}
+
 data class PasteTextCommand(
     override val label: String? = null,
     override val optional: Boolean = false,
@@ -458,6 +475,27 @@ data class ExtractTextWithAICommand(
     }
 }
 
+data class AssertScreenshotCommand(
+    val path: String,
+    val thresholdPercentage: Double,
+    val cropOn: ElementSelector? = null,
+    override val optional: Boolean = false,
+    override val label: String? = null,
+) : Command {
+    override val originalDescription: String
+        get() {
+            val cropInfo = cropOn?.let { " (cropped on ${it.description()})" } ?: ""
+            return "Assert screenshot matches $path (threshold: $thresholdPercentage%)$cropInfo"
+        }
+
+    override fun evaluateScripts(jsEngine: JsEngine): Command {
+        return copy(
+            path = path.evaluateScripts(jsEngine),
+            cropOn = cropOn?.evaluateScripts(jsEngine)
+        )
+    }
+}
+
 data class InputTextCommand(
     val text: String,
     override val label: String? = null,
@@ -515,6 +553,24 @@ data class LaunchAppCommand(
                 val value = it.value
                 it.key.evaluateScripts(jsEngine) to if (value is String) value.evaluateScripts(jsEngine) else it.value
             },
+            label = label?.evaluateScripts(jsEngine)
+        )
+    }
+}
+
+data class SetPermissionsCommand(
+    val appId: String,
+    var permissions: Map<String, String>,
+    override val label: String? = null,
+    override val optional: Boolean = false,
+) : Command {
+
+    override val originalDescription: String
+        get() = "Set permissions"
+
+    override fun evaluateScripts(jsEngine: JsEngine): SetPermissionsCommand {
+        return copy(
+            appId = appId.evaluateScripts(jsEngine),
             label = label?.evaluateScripts(jsEngine)
         )
     }
@@ -595,6 +651,7 @@ data class EraseTextCommand(
 
 data class TakeScreenshotCommand(
     val path: String,
+    val cropOn: ElementSelector? = null,
     override val label: String? = null,
     override val optional: Boolean = false,
 ) : Command {
@@ -602,9 +659,18 @@ data class TakeScreenshotCommand(
     override val originalDescription: String
         get() = "Take screenshot $path"
 
+    override fun description(): String {
+        return label ?: if (cropOn != null) {
+            "Take screenshot $path, cropped to ${cropOn.description()}"
+        } else {
+            "Take screenshot $path"
+        }
+    }
+
     override fun evaluateScripts(jsEngine: JsEngine): TakeScreenshotCommand {
         return copy(
             path = path.evaluateScripts(jsEngine),
+            cropOn = cropOn?.evaluateScripts(jsEngine),
         )
     }
 }

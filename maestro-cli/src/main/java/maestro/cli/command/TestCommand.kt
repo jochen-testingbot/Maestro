@@ -129,6 +129,7 @@ class TestCommand : Callable<Int> {
     @Option(
         names = ["--format"],
         description = ["Test report format (default=\${DEFAULT-VALUE}): \${COMPLETION-CANDIDATES}"],
+        converter = [ReportFormat.Converter::class]
     )
     private var format: ReportFormat = ReportFormat.NOOP
 
@@ -180,6 +181,12 @@ class TestCommand : Callable<Int> {
     private var headless: Boolean = false
 
     @Option(
+        names = ["--screen-size"],
+        description = ["(Web only) Set the size of the headless browser. Use the format {Width}x{Height}. Usage is --screen-size 1920x1080"],
+    )
+    private var screenSize: String? = null
+
+    @Option(
         names = ["--analyze"],
         description = ["[Beta] Enhance the test output analysis with AI Insights"],
     )
@@ -197,8 +204,10 @@ class TestCommand : Callable<Int> {
 
     @Option(
         names = ["--reinstall-driver"],
-        description = ["[Beta] Reinstalls xctestrunner driver before running the test. Set to false if the driver shouldn't be reinstalled"],
-        hidden = true
+        description = ["Reinstalls driver before running the test. On iOS, reinstalls xctestrunner driver. On Android, reinstalls both driver and server apps. Set to false to skip reinstallation."],
+        negatable = true,
+        defaultValue = "true",
+        fallbackValue = "true"
     )
     private var reinstallDriver: Boolean = true
 
@@ -209,6 +218,15 @@ class TestCommand : Callable<Int> {
     )
     private var appleTeamId: String? = null
 
+    @Option(names = ["-p", "--platform"], description = ["Select a platform to run on"])
+    var platform: String? = null
+
+    @Option(
+        names = ["--device", "--udid"],
+        description = ["Device ID to run on explicitly, can be a comma separated list of IDs: --device \"Emulator_1,Emulator_2\" "],
+    )
+    var deviceId: String? = null
+    
     @CommandLine.Spec
     lateinit var commandSpec: CommandLine.Model.CommandSpec
 
@@ -244,6 +262,10 @@ class TestCommand : Callable<Int> {
 
         if (configFile != null && configFile?.exists()?.not() == true) {
             throw CliError("The config file ${configFile?.absolutePath} does not exist.")
+        }
+
+        if (screenSize != null && !screenSize!!.matches(Regex("\\d+x\\d+"))) {
+            throw CliError("Invalid screen size format. Please use the format {Width}x{Height}, e.g. 1920x1080.")
         }
 
         val executionPlan = try {
@@ -358,9 +380,9 @@ class TestCommand : Callable<Int> {
                 }
             }
             .ifEmpty {
+                val platform = platform ?: parent?.platform
                 connectedDevices
-                    .filter { device ->
-                        parent?.platform?.let { Platform.fromString(it) == device.platform } ?: true }
+                    .filter { platform == null || it.platform == Platform.fromString(platform) }
                     .map { it.instanceId }.toSet()
             }
             .toList()
@@ -457,8 +479,9 @@ class TestCommand : Callable<Int> {
             teamId = appleTeamId,
             driverHostPort = driverHostPort,
             deviceId = deviceId,
-            platform = parent?.platform,
+            platform = platform ?: parent?.platform,
             isHeadless = headless,
+            screenSize = screenSize,
             reinstallDriver = reinstallDriver,
             executionPlan = executionPlan
         ) { session ->
@@ -476,7 +499,15 @@ class TestCommand : Callable<Int> {
                     )
                 }
                 runBlocking {
-                    runMultipleFlows(maestro, device, chunkPlans, shardIndex, debugOutputPath, testOutputDir)
+                    runMultipleFlows(
+                        maestro,
+                        device,
+                        chunkPlans,
+                        shardIndex,
+                        debugOutputPath,
+                        testOutputDir,
+                        deviceId,
+                    )
                 }
             } else {
                 val flowFile = flowFiles.first()
@@ -484,9 +515,18 @@ class TestCommand : Callable<Int> {
                     if (!flattenDebugOutput) {
                         TestDebugReporter.deleteOldFiles()
                     }
-                    TestRunner.runContinuous(maestro, device, flowFile, env, analyze, authToken, testOutputDir)
+                    TestRunner.runContinuous(
+                        maestro,
+                        device,
+                        flowFile,
+                        env,
+                        analyze,
+                        authToken,
+                        testOutputDir,
+                        deviceId,
+                    )
                 } else {
-                    runSingleFlow(maestro, device, flowFile, debugOutputPath, testOutputDir)
+                    runSingleFlow(maestro, device, flowFile, debugOutputPath, testOutputDir, deviceId)
                 }
             }
         }
@@ -504,6 +544,7 @@ class TestCommand : Callable<Int> {
         flowFile: File,
         debugOutputPath: Path,
         testOutputDir: Path?,
+        deviceId: String?,
     ): Triple<Int, Int, Nothing?> {
         val resultView =
             if (DisableAnsiMixin.ansiEnabled) {
@@ -527,6 +568,7 @@ class TestCommand : Callable<Int> {
             analyze = analyze,
             apiKey = authToken,
             testOutputDir = testOutputDir,
+            deviceId = deviceId,
         )
         val duration = System.currentTimeMillis() - startTime
 
@@ -557,7 +599,8 @@ class TestCommand : Callable<Int> {
         chunkPlans: List<ExecutionPlan>,
         shardIndex: Int,
         debugOutputPath: Path,
-        testOutputDir: Path?
+        testOutputDir: Path?,
+        deviceId: String?,
     ): Triple<Int?, Int?, TestExecutionSummary> {
         val startTime = System.currentTimeMillis()
         val totalFlowCount = chunkPlans.sumOf { it.flowsToRun.size }
@@ -572,12 +615,14 @@ class TestCommand : Callable<Int> {
             device = device,
             shardIndex = if (chunkPlans.size == 1) null else shardIndex,
             reporter = ReporterFactory.buildReporter(format, testSuiteName),
+            captureSteps = format == ReportFormat.HTML_DETAILED,
         ).runTestSuite(
             executionPlan = chunkPlans[shardIndex],
             env = env,
             reportOut = null,
             debugOutputPath = debugOutputPath,
-            testOutputDir = testOutputDir
+            testOutputDir = testOutputDir,
+            deviceId = deviceId,
         )
 
         val duration = System.currentTimeMillis() - startTime
@@ -617,7 +662,7 @@ class TestCommand : Callable<Int> {
     private fun getPassedOptionsDeviceIds(plan: ExecutionPlan): List<String> {
       val arguments = if (allFlowsAreWebFlow(plan)) {
         "chromium"
-      } else parent?.deviceId
+      } else deviceId ?: parent?.deviceId
       val deviceIds = arguments
         .orEmpty()
         .split(",")
