@@ -231,8 +231,24 @@ class XCTestIOSDevice(
     }
 
     private fun <T> execute(call: () -> T): T {
+        return executeWithRetry(call, maxRetries = APP_NOT_RUNNING_MAX_RETRIES)
+    }
+
+    private fun <T> executeWithRetry(call: () -> T, maxRetries: Int, attempt: Int = 1): T {
         return try {
             call()
+        } catch (appNotRunning: XCUITestServerError.AppNotRunning) {
+            if (attempt < maxRetries) {
+                logger.info("App not running yet, retrying in ${APP_NOT_RUNNING_RETRY_DELAY_MS}ms (attempt $attempt/$maxRetries)")
+                Thread.sleep(APP_NOT_RUNNING_RETRY_DELAY_MS)
+                executeWithRetry(call, maxRetries, attempt + 1)
+            } else {
+                logger.error("App still not running after $maxRetries attempts, treating as crash")
+                throw IOSDeviceErrors.AppCrash(
+                    "App not running after $maxRetries retries. The app may have crashed or failed to launch. " +
+                            "Check diagnostic logs: ~/Library/Logs/DiagnosticReports directory"
+                )
+            }
         } catch (appCrashException: XCUITestServerError.AppCrash) {
             throw IOSDeviceErrors.AppCrash(
                 "App crashed or stopped while executing flow, please check diagnostic logs: " +
@@ -247,6 +263,10 @@ class XCTestIOSDevice(
         private val allPermissions = listOf(
             "notifications"
         )
+
+        // Retry configuration for "app not running" errors (slow app startup)
+        private const val APP_NOT_RUNNING_MAX_RETRIES = 5
+        private const val APP_NOT_RUNNING_RETRY_DELAY_MS = 1000L
     }
 
 }

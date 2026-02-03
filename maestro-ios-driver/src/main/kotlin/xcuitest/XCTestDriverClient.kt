@@ -215,16 +215,23 @@ class XCTestDriverClient(
 
     private fun executeJsonRequest(pathSegment: String, body: Any): String {
         val mediaType = "application/json; charset=utf-8".toMediaType()
-        val bodyData = mapper.writeValueAsString(body).toRequestBody(mediaType)
+        val jsonBody = mapper.writeValueAsString(body)
+        val bodyData = jsonBody.toRequestBody(mediaType)
+        val url = client.xctestAPIBuilder(pathSegment).build()
+
+        logger.info("XCTest request: POST $url body: $jsonBody")
 
         val requestBuilder = Request.Builder()
             .addHeader("Content-Type", "application/json")
-            .url(client.xctestAPIBuilder(pathSegment).build())
+            .url(url)
             .post(bodyData)
 
         return okHttpClient
             .newCall(requestBuilder.build())
-            .execute().use { processResponse(it, pathSegment) }
+            .execute().use {
+                logger.info("XCTest response: ${it.code} for $pathSegment")
+                processResponse(it, pathSegment)
+            }
     }
 
     private fun executeJsonRequest(pathSegment: String): String {
@@ -278,9 +285,9 @@ class XCTestDriverClient(
                 )
             }
             error.errorMessage.contains("Application [a-zA-Z0-9.]+ is not running".toRegex()) -> {
-                logger.error("Request for $pathString failed, because of app crash, body: $responseBodyAsString")
-                throw XCUITestServerError.AppCrash(
-                    "Request for $pathString failed, due to app crash with message ${error.errorMessage}"
+                logger.warn("Request for $pathString failed, app not running yet, body: $responseBodyAsString")
+                throw XCUITestServerError.AppNotRunning(
+                    "Request for $pathString failed, app not running: ${error.errorMessage}"
                 )
             }
             error.errorMessage.contains("Error getting main window kAXErrorCannotComplete") -> {
