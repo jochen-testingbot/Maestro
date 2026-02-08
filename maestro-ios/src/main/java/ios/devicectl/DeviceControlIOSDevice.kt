@@ -1,5 +1,6 @@
 package ios.devicectl
 
+import com.github.michaelbull.result.Ok
 import com.github.michaelbull.result.Result
 import device.IOSDevice
 import device.IOSScreenRecording
@@ -66,7 +67,7 @@ class DeviceControlIOSDevice(override val deviceId: String) : IOSDevice {
     }
 
     override fun clearKeychain(): Result<Unit, Throwable> {
-        TODO("Not yet implemented")
+        return Ok(Unit)
     }
 
     override fun launch(id: String, launchArguments: Map<String, Any>) {
