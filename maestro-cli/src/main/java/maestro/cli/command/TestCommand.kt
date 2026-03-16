@@ -279,6 +279,12 @@ class TestCommand : Callable<Int> {
             throw CliError(e.message)
         }
 
+        // Merge workspace config env vars with CLI env vars (CLI -e takes priority)
+        val workspaceEnv = executionPlan.workspaceConfig.env
+        if (workspaceEnv.isNotEmpty()) {
+            env = workspaceEnv + env
+        }
+
         val resolvedTestOutputDir = resolveTestOutputDir(executionPlan)
 
         // Update TestDebugReporter with the resolved test output directory
