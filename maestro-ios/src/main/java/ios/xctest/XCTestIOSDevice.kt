@@ -261,7 +261,21 @@ class XCTestIOSDevice(
 
     companion object {
         private val allPermissions = listOf(
-            "notifications"
+            "notifications",
+            "location",
+            "bluetooth",
+            "camera",
+            "microphone",
+            "photos",
+            "contacts",
+            "calendar",
+            "reminders",
+            "speech",
+            "motion",
+            "homekit",
+            "medialibrary",
+            "siri",
+            "usertracking"
         )
 
         // Retry configuration for "app not running" errors (slow app startup)

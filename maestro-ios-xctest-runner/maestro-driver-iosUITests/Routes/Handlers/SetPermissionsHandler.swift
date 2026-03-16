@@ -17,6 +17,7 @@ struct SetPermissionsHandler: HTTPHandler {
         do {
             let permissionsMap = try JSONEncoder().encode(requestBody.permissions)
             UserDefaults.standard.set(permissionsMap, forKey: "permissions")
+            NSLog("[SetPermissionsHandler] Stored permissions: \(requestBody.permissions.map { "\($0.key)=\($0.value.rawValue)" }.joined(separator: ", "))")
             return HTTPResponse(statusCode: .ok)
         } catch let error {
             return AppError(message: "Failure in setting permissions. Error: \(error.localizedDescription)").httpResponse

@@ -33,12 +33,12 @@ struct XCTestHTTPServer {
         NSLog("[XCTestHTTPServer] PORT env var: %@", ProcessInfo.processInfo.environment["PORT"] ?? "nil")
         NSLog("[XCTestHTTPServer] Using port: %d", actualPort)
         let server = HTTPServer(address: try .inet(ip4: "0.0.0.0", port: actualPort), timeout: 100)
-        
+
         for route in Route.allCases {
             let handler = await RouteHandlerFactory.createRouteHandler(route: route)
             await server.appendRoute(route.toHTTPRoute(), to: handler)
         }
-        
+
         try await server.run()
     }
 }

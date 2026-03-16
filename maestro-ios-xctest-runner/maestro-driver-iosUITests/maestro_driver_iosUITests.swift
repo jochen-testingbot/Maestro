@@ -17,6 +17,13 @@ final class maestro_driver_iosUITests: XCTestCase {
         // when an XCTest internal error happes (eg: when using .allElementsBoundByIndex
         // on a ReactNative app)
         continueAfterFailure = true
+
+        // Register a UI interruption monitor to automatically handle system permission dialogs.
+        // This fires whenever a system alert/sheet blocks an XCUITest interaction.
+        addUIInterruptionMonitor(withDescription: "System Permission Dialog") { element in
+            return SystemPermissionHelper.handleInterruption(element)
+        }
+        NSLog("[maestro_driver_iosUITests] Registered UI interruption monitor for system permission dialogs")
     }
 
     override class func setUp() {
