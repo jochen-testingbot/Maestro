@@ -145,7 +145,7 @@ class XCTestIOSDevice(
         launchArguments: Map<String, Any>,
     ) {
         execute {
-            client.launchApp(id)
+            client.launchApp(id, launchArguments)
         }
     }
 
@@ -275,7 +275,8 @@ class XCTestIOSDevice(
             "homekit",
             "medialibrary",
             "siri",
-            "usertracking"
+            "usertracking",
+            "localnetwork"
         )
 
         // Retry configuration for "app not running" errors (slow app startup)

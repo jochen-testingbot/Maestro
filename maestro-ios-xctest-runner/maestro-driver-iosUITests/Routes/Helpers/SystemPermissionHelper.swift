@@ -106,22 +106,35 @@ final class SystemPermissionHelper {
             labelPattern: "Would Like Permission to Track",
             buttonMap: [.allow: 1, .deny: 0]
         ),
+        // Local Network: [Don't Allow (0), Allow (1)]
+        // Dialog: "Allow X to find devices on local networks?"
+        PermissionDialog(
+            key: "localnetwork",
+            labelPattern: "local network",
+            buttonMap: [.allow: 1, .deny: 0]
+        ),
     ]
 
     // MARK: - Helpers
 
-    /// Returns the stored permissions with Bluetooth always defaulting to .allow.
-    /// Bluetooth dialogs block the entire UI and are rarely intentionally denied in test flows,
-    /// so we auto-allow them unless explicitly configured otherwise.
+    /// Permissions that are auto-allowed by default unless explicitly configured otherwise.
+    /// These dialogs block the entire UI and are rarely intentionally denied in test flows.
+    private static let autoAllowPermissions = ["bluetooth", "localnetwork"]
+
+    /// Returns the stored permissions with auto-allow defaults applied.
     private static func effectivePermissions() -> [String: PermissionValue]? {
         guard let data = UserDefaults.standard.object(forKey: "permissions") as? Data,
               var permissions = try? JSONDecoder().decode([String: PermissionValue].self, from: data) else {
-            // Even with no permissions configured, still handle Bluetooth
-            return ["bluetooth": .allow]
+            // Even with no permissions configured, still handle auto-allow permissions
+            var defaults: [String: PermissionValue] = [:]
+            for key in autoAllowPermissions { defaults[key] = .allow }
+            return defaults
         }
-        // Default Bluetooth to allow if not explicitly set
-        if permissions["bluetooth"] == nil {
-            permissions["bluetooth"] = .allow
+        // Apply auto-allow defaults for permissions not explicitly set
+        for key in autoAllowPermissions {
+            if permissions[key] == nil {
+                permissions[key] = .allow
+            }
         }
         return permissions.isEmpty ? nil : permissions
     }
@@ -195,8 +208,9 @@ final class SystemPermissionHelper {
     /// Called from ViewHierarchyHandler when Springboard is the foreground app.
     /// Acts as a fallback in case the interruption monitor did not fire.
     ///
-    /// Uses targeted predicate queries per dialog — avoids allElementsBoundByIndex which crashes
-    /// when Springboard has elements in unreachable remote processes.
+    /// Queries the alert/sheet ONCE and matches its label against all patterns — avoids
+    /// running N predicate queries per element type, which causes XCUITest errors to accumulate
+    /// and crash the test with "Interrupted by waiter."
     static func handleSystemPermissionAlertIfNeeded(foregroundApp: XCUIApplication) {
         guard foregroundApp.bundleID == "com.apple.springboard" else {
             return
@@ -206,38 +220,59 @@ final class SystemPermissionHelper {
             return
         }
 
-        for dialog in permissionDialogs {
-            guard let permissionValue = permissions[dialog.key] else {
-                continue
-            }
-            if permissionValue == .unset || permissionValue == .unknown {
-                continue
-            }
+        // Check the first alert once, then match its label against all dialog patterns
+        let alert = foregroundApp.alerts.element
+        if alert.exists {
+            let alertLabel = alert.label.lowercased()
+            NSLog("[SystemPermissionHelper] [Fallback] Found alert with label: '\(alert.label)'")
 
+            for dialog in permissionDialogs {
+                guard let permissionValue = permissions[dialog.key],
+                      permissionValue != .unset && permissionValue != .unknown else {
+                    continue
+                }
+                if alertLabel.contains(dialog.labelPattern.lowercased()) {
+                    NSLog("[SystemPermissionHelper] [Fallback] Matched '\(dialog.key)' in alert")
+                    tapButton(in: alert, dialog: dialog, permissionValue: permissionValue)
+                    return
+                }
+            }
+            NSLog("[SystemPermissionHelper] [Fallback] Alert did not match any known permission dialog")
+        }
+
+        // Check the first sheet once
+        let sheet = foregroundApp.sheets.element
+        if sheet.exists {
+            let sheetLabel = sheet.label.lowercased()
+            NSLog("[SystemPermissionHelper] [Fallback] Found sheet with label: '\(sheet.label)'")
+
+            for dialog in permissionDialogs {
+                guard let permissionValue = permissions[dialog.key],
+                      permissionValue != .unset && permissionValue != .unknown else {
+                    continue
+                }
+                if sheetLabel.contains(dialog.labelPattern.lowercased()) {
+                    NSLog("[SystemPermissionHelper] [Fallback] Matched '\(dialog.key)' in sheet")
+                    tapButton(in: sheet, dialog: dialog, permissionValue: permissionValue)
+                    return
+                }
+            }
+            NSLog("[SystemPermissionHelper] [Fallback] Sheet did not match any known permission dialog")
+        }
+
+        // For custom system dialogs (e.g. Bluetooth "find devices", Local Network)
+        // that are neither alerts nor sheets: check static texts with targeted predicates.
+        // Only check auto-allow permissions here to minimize queries.
+        for key in autoAllowPermissions {
+            guard let dialog = permissionDialogs.first(where: { $0.key == key }),
+                  let permissionValue = permissions[key],
+                  permissionValue != .unset && permissionValue != .unknown else {
+                continue
+            }
             let predicate = NSPredicate(format: "label CONTAINS[c] %@", dialog.labelPattern)
-
-            // Check alerts (standard permission dialogs)
-            let alert = foregroundApp.alerts.matching(predicate).element
-            if alert.exists {
-                NSLog("[SystemPermissionHelper] [Fallback] Detected '\(dialog.key)' as alert")
-                tapButton(in: alert, dialog: dialog, permissionValue: permissionValue)
-                return
-            }
-
-            // Check sheets (some system dialogs)
-            let sheet = foregroundApp.sheets.matching(predicate).element
-            if sheet.exists {
-                NSLog("[SystemPermissionHelper] [Fallback] Detected '\(dialog.key)' as sheet")
-                tapButton(in: sheet, dialog: dialog, permissionValue: permissionValue)
-                return
-            }
-
-            // Check static texts directly on Springboard (custom dialogs like Bluetooth "find devices")
-            // Uses a targeted predicate query — does NOT iterate all elements
             let matchingText = foregroundApp.staticTexts.matching(predicate).element
             if matchingText.exists {
                 NSLog("[SystemPermissionHelper] [Fallback] Detected '\(dialog.key)' via Springboard static text (custom dialog)")
-                // For custom dialogs, find buttons by label since they're not inside an alert/sheet container
                 let targetLabel: String
                 switch permissionValue {
                 case .deny, .never:

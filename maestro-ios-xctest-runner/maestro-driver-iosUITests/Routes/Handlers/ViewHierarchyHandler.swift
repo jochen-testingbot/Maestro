@@ -125,6 +125,10 @@ struct ViewHierarchyHandler: HTTPHandler {
         do {
             var hierarchy = try elementHierarchy(xcuiElement: element)
             logger.info("Successfully retrieved element hierarchy.")
+            if let jsonData = try? JSONEncoder().encode(hierarchy),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                logLargeString("[ViewHierarchyHandler] Hierarchy JSON", jsonString)
+            }
 
             if hierarchy.depth() < snapshotMaxDepth {
                 return hierarchy
@@ -261,6 +265,10 @@ struct ViewHierarchyHandler: HTTPHandler {
             AXClientSwizzler.overwriteDefaultParameters["maxDepth"] = snapshotMaxDepth
             let safariHierarchy = try elementHierarchy(xcuiElement: safariWebService)
             NSLog("[Done] Safari WebView hierarchy fetched successfully")
+            if let jsonData = try? JSONEncoder().encode(safariHierarchy),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                logLargeString("[ViewHierarchyHandler] Safari WebView hierarchy JSON", jsonString)
+            }
             return safariHierarchy
         } catch {
             NSLog("[Error] Failed to fetch Safari WebView hierarchy: \(error.localizedDescription)")
@@ -283,5 +291,21 @@ struct ViewHierarchyHandler: HTTPHandler {
     private func elementHierarchy(xcuiElement: XCUIElement) throws -> AXElement {
         let snapshotDictionary = try xcuiElement.snapshot().dictionaryRepresentation
         return AXElement(snapshotDictionary)
+    }
+
+    /// Logs a large string in chunks to avoid NSLog truncation (~1024 char limit).
+    private func logLargeString(_ prefix: String, _ string: String) {
+        let chunkSize = 800
+        let totalChars = string.count
+        NSLog("%@ (%d chars total)", prefix, totalChars)
+        var offset = string.startIndex
+        var chunkIndex = 0
+        while offset < string.endIndex {
+            let end = string.index(offset, offsetBy: chunkSize, limitedBy: string.endIndex) ?? string.endIndex
+            let chunk = String(string[offset..<end])
+            NSLog("%@ [%d]: %@", prefix, chunkIndex, chunk)
+            offset = end
+            chunkIndex += 1
+        }
     }
 }

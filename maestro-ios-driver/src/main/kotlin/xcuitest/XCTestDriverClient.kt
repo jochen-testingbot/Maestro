@@ -62,8 +62,9 @@ class XCTestDriverClient(
         executeJsonRequest("terminateApp", TerminateAppRequest(appId))
     }
 
-    fun launchApp(appId: String) {
-        executeJsonRequest("launchApp", LaunchAppRequest(appId))
+    fun launchApp(appId: String, launchArguments: Map<String, Any> = emptyMap()) {
+        val args = if (launchArguments.isEmpty()) null else launchArguments
+        executeJsonRequest("launchApp", LaunchAppRequest(appId, args))
     }
 
     fun keyboardInfo(installedApps: Set<String>): KeyboardInfoResponse {
