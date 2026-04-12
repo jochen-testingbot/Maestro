@@ -73,6 +73,18 @@ YAML Flow → YamlCommandReader → MaestroCommand → Orchestra → Maestro →
 - E2E tests: Located in `/e2e/` directory, require real devices/emulators
 - Use `FakeDriver` instead of mocks for driver testing
 
+## iOS Physical Device Driver
+
+The pre-built XCTest runner (`maestro-driver-iosUITests-Runner.app`) is signed with a Development provisioning profile. Every physical test device UDID must be registered in the profile or install fails with `0xe8008012`.
+
+When adding a new device:
+1. Register UDID in Apple Developer Portal
+2. `fastlane match development` to regenerate profile
+3. `./maestro-ios-xctest-runner/resign-maestro-ios-runner.sh /path/to/profile.mobileprovision`
+4. Deploy `~/.maestro/maestro-iphoneos-driver-build.zip` to test machines
+
+Key code: `LocalIOSDeviceController.kt` (install/launch via `xcrun devicectl`), `LocalXCTestInstaller.kt` (orchestration), `IOSBuildProductsExtractor.kt` (bundle extraction).
+
 ## Debug Logs
 
 - CLI logs: `~/.maestro/tests/*/maestro.log`
