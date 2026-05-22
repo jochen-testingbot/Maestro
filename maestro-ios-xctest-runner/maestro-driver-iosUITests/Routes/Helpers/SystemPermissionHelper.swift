@@ -1,5 +1,7 @@
 import XCTest
+import MaestroDriverLib
 
+@MainActor
 final class SystemPermissionHelper {
 
     // MARK: - Permission dialog definitions
@@ -121,6 +123,10 @@ final class SystemPermissionHelper {
     /// These dialogs block the entire UI and are rarely intentionally denied in test flows.
     private static let autoAllowPermissions = ["bluetooth", "localnetwork"]
 
+    /// AXElement-based button finder from upstream MaestroDriverLib. Used as an additional
+    /// fallback when XCUIElement queries don't find a matching dialog.
+    private static let buttonFinder = PermissionButtonFinder()
+
     /// Returns the stored permissions with auto-allow defaults applied.
     private static func effectivePermissions() -> [String: PermissionValue]? {
         guard let data = UserDefaults.standard.object(forKey: "permissions") as? Data,
@@ -211,7 +217,13 @@ final class SystemPermissionHelper {
     /// Queries the alert/sheet ONCE and matches its label against all patterns — avoids
     /// running N predicate queries per element type, which causes XCUITest errors to accumulate
     /// and crash the test with "Interrupted by waiter."
-    static func handleSystemPermissionAlertIfNeeded(foregroundApp: XCUIApplication) {
+    ///
+    /// The `appHierarchy` parameter (added in upstream v2.6.0 to enable AXElement-based
+    /// button finding via MaestroDriverLib's `PermissionButtonFinder`) is accepted to keep the
+    /// caller signature stable. The XCUIElement-based path below covers all 16 known dialogs
+    /// and is preferred; we fall through to PermissionButtonFinder only for notifications when
+    /// the XCUIElement query path didn't match.
+    static func handleSystemPermissionAlertIfNeeded(appHierarchy: AXElement, foregroundApp: XCUIApplication) async {
         guard foregroundApp.bundleID == "com.apple.springboard" else {
             return
         }
@@ -291,6 +303,24 @@ final class SystemPermissionHelper {
                 return
             }
         }
+
+        // Last-resort: upstream's AXElement-based button finder for the notifications dialog.
+        // Only fires for notifications because that's all PermissionButtonFinder currently knows
+        // about. The XCUIElement path above will normally cover this; this is purely defensive.
+        if let notificationsPermission = permissions["notifications"] {
+            let result = buttonFinder.findButtonToTap(for: notificationsPermission, in: appHierarchy)
+            switch result {
+            case .found(let frame):
+                NSLog("[SystemPermissionHelper] [AX-Fallback] Found notifications button at frame: \(frame)")
+                await tapAtCenter(of: frame, in: foregroundApp)
+            case .noButtonsFound:
+                NSLog("[SystemPermissionHelper] [AX-Fallback] No buttons found in hierarchy")
+            case .noActionRequired:
+                break
+            @unknown default:
+                NSLog("[SystemPermissionHelper] [AX-Fallback] Unknown permission button result: \(result)")
+            }
+        }
     }
 
     /// Tap a button by index within a dialog element (alert or sheet).
@@ -308,6 +338,34 @@ final class SystemPermissionHelper {
             NSLog("[SystemPermissionHelper] [Fallback] Successfully tapped '\(buttonLabel)' on '\(dialog.key)'")
         } else {
             NSLog("[SystemPermissionHelper] [Fallback] Button at index \(buttonIndex) not found for '\(dialog.key)'")
+        }
+    }
+
+    /// Tap at the center of an element's frame using the RunnerDaemonProxy.
+    /// Imported from upstream v2.6.0 — used by the AXElement fallback path.
+    private static func tapAtCenter(of frame: AXFrame, in app: XCUIApplication) async {
+        let x = frame.centerX
+        let y = frame.centerY
+
+        NSLog("Tapping at coordinates: (\(x), \(y))")
+
+        let (width, height) = ScreenSizeHelper.physicalScreenSize()
+        let point = ScreenSizeHelper.orientationAwarePoint(
+            width: width,
+            height: height,
+            point: CGPoint(x: CGFloat(x), y: CGFloat(y))
+        )
+
+        let eventRecord = EventRecord(orientation: .portrait)
+        _ = eventRecord.addPointerTouchEvent(
+            at: point,
+            touchUpAfter: nil
+        )
+
+        do {
+            try await RunnerDaemonProxy().synthesize(eventRecord: eventRecord)
+        } catch {
+            NSLog("Error tapping permission button: \(error)")
         }
     }
 }

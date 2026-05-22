@@ -19,13 +19,13 @@
 
 package maestro.orchestra
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.yield
 import maestro.Driver
 import maestro.ElementFilter
 import maestro.Filters
-import com.github.romankh3.image.comparison.ImageComparison
-import com.github.romankh3.image.comparison.model.ImageComparisonState
 import io.grpc.Status
 import maestro.*
 import maestro.Filters.asFilter
@@ -41,7 +41,6 @@ import maestro.ai.CloudAIPredictionEngine
 import maestro.ai.AIPredictionEngine
 import maestro.js.GraalJsEngine
 import maestro.js.JsEngine
-import maestro.js.RhinoJsEngine
 import maestro.orchestra.error.UnicodeNotSupportedError
 import maestro.orchestra.filter.FilterWithDescription
 import maestro.orchestra.filter.TraitFilters
@@ -140,6 +139,16 @@ class Orchestra(
     private val apiKey: String? = null,
     private val AIPredictionEngine: AIPredictionEngine? = apiKey?.let { CloudAIPredictionEngine(it) },
     private val flowController: FlowController = DefaultFlowController(),
+    internal val jsEngineFactory: (MaestroConfig?) -> JsEngine = { config ->
+        // Defense-in-depth: WorkspaceValidator is the primary gate for `jsEngine: rhino`,
+        // but throw here too in case Orchestra is invoked outside the validation pipeline.
+        check(config?.ext?.get("jsEngine") != "rhino") {
+            "The Rhino JS engine has been removed. Remove `jsEngine: rhino` from your config; " +
+                "flows now run on GraalJS, the default engine."
+        }
+        val platform = maestro.cachedDeviceInfo.platform.toString().lowercase()
+        httpClient?.let { GraalJsEngine(it, platform) } ?: GraalJsEngine(platform = platform)
+    },
 ) {
 
     private lateinit var jsEngine: JsEngine
@@ -187,16 +196,24 @@ class Orchestra(
                     screenRecording?.close()
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             exception = e
         } finally {
-            val onCompleteSuccess = config?.onFlowComplete?.commands?.let {
-                executeCommands(
-                    commands = it,
-                    config = config,
-                    shouldReinitJsEngine = false,
-                )
-            } ?: true
+            val onCompleteSuccess = if (currentCoroutineContext().isActive) {
+                config?.onFlowComplete?.commands?.let {
+                    executeCommands(
+                        commands = it,
+                        config = config,
+                        shouldReinitJsEngine = false,
+                    )
+                } ?: true
+            } else {
+                true
+            }
+
+            jsEngine.close()
 
             exception?.let { throw it }
 
@@ -204,7 +221,7 @@ class Orchestra(
         }
     }
 
-    suspend fun executeCommands(
+    private suspend fun executeCommands(
         commands: List<MaestroCommand>,
         config: MaestroConfig? = null,
         shouldReinitJsEngine: Boolean = true,
@@ -213,19 +230,12 @@ class Orchestra(
             initJsEngine(config)
         }
 
-        if (!currentCoroutineContext().isActive) {
-            logger.info("Flow cancelled, skipping initAndroidChromeDevTools...")
-        } else {
-            initAndroidChromeDevTools(config)
-        }
+        yield()
+        initAndroidChromeDevTools(config)
 
         commands
             .forEachIndexed { index, command ->
-                if (!currentCoroutineContext().isActive) {
-                    logger.info("[Command execution] Command skipped due to cancellation: $command")
-                    onCommandSkipped(index, command)
-                    return@forEachIndexed
-                }
+                yield()
 
                 // Check for pause before executing each command
                 flowController.waitIfPaused()
@@ -277,6 +287,8 @@ class Orchestra(
                     logger.info("[Command execution] CommandSkipped: ${ignored.message}")
                     // Swallow exception
                     onCommandSkipped(index, command)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Throwable) {
                     logger.error("[Command execution] CommandFailed: ${e.message}")
                     val errorResolution = onCommandFailed(index, command, e)
@@ -296,18 +308,10 @@ class Orchestra(
         if (this::jsEngine.isInitialized) {
             jsEngine.close()
         }
-        val isRhinoExplicitlyRequested = config?.ext?.get("jsEngine") == "rhino"
-                
-        val platform = maestro.cachedDeviceInfo.platform.toString().lowercase()
-        jsEngine = if (isRhinoExplicitlyRequested) {
-            httpClient?.let { RhinoJsEngine(it, platform) } ?: RhinoJsEngine(platform = platform)
-        } else {
-            // Default to GraalJS for better performance and compatibility
-            httpClient?.let { GraalJsEngine(it, platform) } ?: GraalJsEngine(platform = platform)
-        }
+        jsEngine = jsEngineFactory(config)
     }
 
-    private fun initAndroidChromeDevTools(config: MaestroConfig?) {
+    private suspend fun initAndroidChromeDevTools(config: MaestroConfig?) {
         if (config == null) return
         val shouldEnableAndroidChromeDevTools = config.ext["androidWebViewHierarchy"] == "devtools"
         maestro.setAndroidChromeDevToolsEnabled(shouldEnableAndroidChromeDevTools)
@@ -318,10 +322,6 @@ class Orchestra(
      */
     private suspend fun executeCommand(maestroCommand: MaestroCommand, config: MaestroConfig?): Boolean {
         val command = maestroCommand.asCommand()
-
-        if (!currentCoroutineContext().isActive) {
-            throw CommandSkipped
-        }
 
         flowController.waitIfPaused()
 
@@ -387,7 +387,7 @@ class Orchestra(
         }
     }
 
-    private fun setAirplaneMode(command: SetAirplaneModeCommand): Boolean {
+    private suspend fun setAirplaneMode(command: SetAirplaneModeCommand): Boolean {
         when (command.value) {
             AirplaneValue.Enable -> maestro.setAirplaneModeState(true)
             AirplaneValue.Disable -> maestro.setAirplaneModeState(false)
@@ -396,12 +396,12 @@ class Orchestra(
         return true
     }
 
-    private fun toggleAirplaneMode(): Boolean {
+    private suspend fun toggleAirplaneMode(): Boolean {
         maestro.setAirplaneModeState(!maestro.isAirplaneModeEnabled())
         return true
     }
 
-    private fun travelCommand(command: TravelCommand): Boolean {
+    private suspend fun travelCommand(command: TravelCommand): Boolean {
         Traveller.travel(
             maestro = maestro,
             points = command.points,
@@ -411,12 +411,12 @@ class Orchestra(
         return true
     }
 
-    private fun addMediaCommand(mediaPaths: List<String>): Boolean {
+    private suspend fun addMediaCommand(mediaPaths: List<String>): Boolean {
         maestro.addMedia(mediaPaths)
         return true
     }
 
-    private fun assertConditionCommand(command: AssertConditionCommand): Boolean {
+    private suspend fun assertConditionCommand(command: AssertConditionCommand): Boolean {
         val timeout = (command.timeoutMs() ?: lookupTimeoutMs)
         val debugMessage = """
             Assertion '${command.condition.description()}' failed. Check the UI hierarchy in debug artifacts to verify the element state and properties.
@@ -535,15 +535,29 @@ class Orchestra(
         return false
     }
 
-    private suspend fun assertScreenshotCommand(command: AssertScreenshotCommand): Boolean {
-        val path = command.path
-        val thresholdDifferencePercentage = (100 - command.thresholdPercentage)
+    private fun normalizeScreenshotPath(path: String): String {
+        val imageExtensions = listOf(".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".wbmp", ".heic", ".heif")
+        return if (imageExtensions.any { path.endsWith(it, ignoreCase = true) }) path else "$path.png"
+    }
 
-        val expectedFile = if (screenshotsDir != null) {
-            screenshotsDir.resolve(path).toFile()
-        } else {
-            File(path)
-        }
+    private suspend fun assertScreenshotCommand(command: AssertScreenshotCommand): Boolean {
+        val path = normalizeScreenshotPath(command.path)
+
+        val candidates = buildList {
+            command.flowPath?.let { add(it.resolve(path).toFile()) }
+            screenshotsDir?.let { add(it.resolve(path).toFile()) }
+            add(File(path))
+        }.distinctBy { it.canonicalPath }
+
+        val expectedFile = candidates.firstOrNull { it.exists() }
+            ?: throw MaestroException.AssertionFailure(
+                message = "Screenshot file not found: $path. Searched in:\n" +
+                    candidates.joinToString("\n") { "  - ${it.absolutePath}" },
+                hierarchyRoot = maestro.viewHierarchy().root,
+                debugMessage = "The assertScreenshot command requires a pre-existing reference screenshot. " +
+                    "Create it at one of the searched locations above."
+            )
+
         expectedFile.parentFile?.mkdirs()
 
         // Temp file is always PNG since maestro.takeScreenshot produces PNG
@@ -569,14 +583,6 @@ class Orchestra(
 
         val actualImage: BufferedImage = ImageIO.read(actualScreenshotFile)
 
-        if (!expectedFile.exists()) {
-            throw MaestroException.AssertionFailure(
-                message = "Screenshot file not found: ${expectedFile.absolutePath}. Expected screenshot file does not exist. Please create the reference screenshot first.",
-                hierarchyRoot = maestro.viewHierarchy().root,
-                debugMessage = "The assertScreenshot command requires a pre-existing reference screenshot file. The file was expected at: ${expectedFile.absolutePath}"
-            )
-        }
-
         val expectedImage: BufferedImage = ImageIO.read(expectedFile) ?: throw MaestroException.AssertionFailure(
             message = "Failed to read image file: ${expectedFile.absolutePath}. Unsupported image format or file could not be read.",
             hierarchyRoot = maestro.viewHierarchy().root,
@@ -589,59 +595,53 @@ class Orchestra(
             path
         }
         val diffFileName = "${baseName}_diff.png"
-        val diffFile = if (screenshotsDir != null) {
-            screenshotsDir.resolve(diffFileName).toFile()
-        } else {
-            File(diffFileName)
-        }
+        val diffFile = expectedFile.parentFile?.resolve(diffFileName) ?: File(diffFileName)
 
-        val comparison =
-            ImageComparison(expectedImage, actualImage, diffFile)
-
-        comparison.apply {
-            allowingPercentOfDifferentPixels = thresholdDifferencePercentage
-            rectangleLineWidth = 10
-            pixelToleranceLevel = 0.1 
-            minimalRectangleSize = 40
-        }
-
-        val comparisonState = comparison.compareImages()
-
-        if (ImageComparisonState.MISMATCH === comparisonState.imageComparisonState) {
-            throw MaestroException.AssertionFailure(
-                message = "Comparison error: ${command.description()} - threshold not met, current: ${100 - comparisonState.differencePercent}%",
+        when (val result = ScreenshotMatch.compare(expectedImage, actualImage, command.thresholdPercentage, diffFile)) {
+            is ScreenshotMatch.Result.Match -> return false // Screenshots are non-interactive
+            is ScreenshotMatch.Result.SizeMismatch -> throw MaestroException.AssertionFailure(
+                message = "Screenshot size mismatch: ${command.description()} - expected ${result.expectedWidth}x${result.expectedHeight}, actual ${result.actualWidth}x${result.actualHeight}. Screenshots must have the same dimensions to compare.",
+                hierarchyRoot = maestro.viewHierarchy().root,
+                debugMessage = "The assertScreenshot command requires the actual screenshot to have the same dimensions as the reference. Expected: ${result.expectedWidth}x${result.expectedHeight}, got: ${result.actualWidth}x${result.actualHeight}. Use the same device/emulator or cropOn to align dimensions."
+            )
+            is ScreenshotMatch.Result.Mismatch -> throw MaestroException.AssertionFailure(
+                message = "Comparison error: ${command.description()} - threshold not met, current: ${result.matchPercent}%",
                 hierarchyRoot = maestro.viewHierarchy().root,
                 debugMessage = "Screenshot comparison failed. Check the diff image at ${diffFile.absolutePath} to see the differences. Adjust the thresholdPercentage if the differences are acceptable."
             )
         }
-        return true
     }
 
 
     private fun evalScriptCommand(command: EvalScriptCommand): Boolean {
         command.scriptString.evaluateScripts(jsEngine)
 
-        // We do not actually know if there were any mutations, but we assume there were
+        // Scripts can trigger HTTP requests that cause the app to receive a state change
+        // (e.g. via WebSocket or push notification), mutating the hierarchy. We conservatively
+        // treat these as mutating.
         return true
     }
 
-    private fun runScriptCommand(command: RunScriptCommand): Boolean {
+    private suspend fun runScriptCommand(command: RunScriptCommand): Boolean {
         return if (evaluateCondition(command.condition, commandOptional = command.optional)) {
             jsEngine.evaluateScript(
                 script = command.script,
                 env = command.env,
                 sourceName = command.sourceDescription,
+                scriptDir = command.scriptDir,
                 runInSubScope = true,
             )
 
-            // We do not actually know if there were any mutations, but we assume there were
+            // Scripts can trigger HTTP requests that cause the app to receive a state change
+            // (e.g. via WebSocket or push notification), mutating the hierarchy. We conservatively
+            // treat these as mutating.
             true
         } else {
             throw CommandSkipped
         }
     }
 
-    private fun waitForAnimationToEndCommand(command: WaitForAnimationToEndCommand): Boolean {
+    private suspend fun waitForAnimationToEndCommand(command: WaitForAnimationToEndCommand): Boolean {
         maestro.waitForAnimationToEnd(command.timeout)
 
         return true
@@ -655,19 +655,19 @@ class Orchestra(
         return false
     }
 
-    private fun setLocationCommand(command: SetLocationCommand): Boolean {
+    private suspend fun setLocationCommand(command: SetLocationCommand): Boolean {
         maestro.setLocation(command.latitude, command.longitude)
 
         return true
     }
 
-    private fun setOrientationCommand(command: SetOrientationCommand): Boolean {
-        maestro.setOrientation(command.orientation)
+    private suspend fun setOrientationCommand(command: SetOrientationCommand): Boolean {
+        maestro.setOrientation(command.resolvedOrientation())
 
         return true
     }
 
-    private fun clearAppStateCommand(command: ClearStateCommand): Boolean {
+    private suspend fun clearAppStateCommand(command: ClearStateCommand): Boolean {
         maestro.clearAppState(command.appId)
         // Android's clear command also resets permissions
         // Reset all permissions to unset so both platforms behave the same
@@ -676,24 +676,24 @@ class Orchestra(
         return true
     }
 
-    private fun stopAppCommand(command: StopAppCommand): Boolean {
+    private suspend fun stopAppCommand(command: StopAppCommand): Boolean {
         maestro.stopApp(command.appId)
 
         return true
     }
 
-    private fun killAppCommand(command: KillAppCommand): Boolean {
+    private suspend fun killAppCommand(command: KillAppCommand): Boolean {
         maestro.killApp(command.appId)
 
         return true
     }
 
-    private fun scrollVerticalCommand(): Boolean {
+    private suspend fun scrollVerticalCommand(): Boolean {
         maestro.scrollVertical()
         return true
     }
 
-    private fun scrollUntilVisible(command: ScrollUntilVisibleCommand): Boolean {
+    private suspend fun scrollUntilVisible(command: ScrollUntilVisibleCommand): Boolean {
         val endTime = System.currentTimeMillis() + command.timeout.toLong()
         val direction = command.direction.toSwipeDirection()
         val deviceInfo = maestro.deviceInfo()
@@ -702,6 +702,7 @@ class Orchestra(
         val maxRetryCenterCount = 4 // for when the list is no longer scrollable (last element) but the element is visible
 
         do {
+            yield()
             try {
                 val element = findElement(command.selector, command.optional, 500).element
                 val visibility = element.getVisiblePercentage(deviceInfo.widthGrid, deviceInfo.heightGrid)
@@ -767,7 +768,7 @@ class Orchestra(
         )
     }
 
-    private fun hideKeyboardCommand(): Boolean {
+    private suspend fun hideKeyboardCommand(): Boolean {
         maestro.hideKeyboard()
 
         // Throw error in case keyboard is still visible
@@ -786,7 +787,7 @@ class Orchestra(
         return true
     }
 
-    private fun backPressCommand(): Boolean {
+    private suspend fun backPressCommand(): Boolean {
         maestro.backPress()
         return true
     }
@@ -802,13 +803,14 @@ class Orchestra(
 
         var mutating = false
 
-        val checkCondition: () -> Boolean = {
-            command.condition
+        suspend fun checkCondition(): Boolean {
+            return command.condition
                 ?.evaluateScripts(jsEngine)
                 ?.let { evaluateCondition(it, commandOptional = command.optional) } != false
         }
 
-        while (checkCondition() && counter < maxRuns && currentCoroutineContext().isActive) {
+        while (checkCondition() && counter < maxRuns) {
+            yield()
             if (counter > 0) {
                 command.commands.forEach { resetCommand(it) }
             }
@@ -833,11 +835,14 @@ class Orchestra(
     private suspend fun retryCommand(command: RetryCommand, config: MaestroConfig?): Boolean {
         val maxRetries = (command.maxRetries?.toIntOrNull() ?: 1).coerceAtMost(MAX_RETRIES_ALLOWED)
 
+        // Retry is intended for flaky test-level failures — element not found, assertion
+        // failures, etc. — which all surface as MaestroException. Anything else (driver
+        // transport failures, JS evaluation bugs, CancellationException) propagates naturally.
         var attempt = 0
         while (attempt <= maxRetries) {
             try {
                 return runSubFlow(command.commands, config, command.config)
-            } catch (exception: Throwable) {
+            } catch (exception: MaestroException) {
                 if (attempt == maxRetries) {
                     logger.error("Max retries ($maxRetries) reached. Commands failed.", exception)
                     throw exception
@@ -881,7 +886,7 @@ class Orchestra(
         }
     }
 
-    private fun evaluateCondition(
+    private suspend fun evaluateCondition(
         condition: Condition?,
         commandOptional: Boolean,
         timeoutMs: Long? = null,
@@ -933,16 +938,14 @@ class Orchestra(
         }
 
         condition.notVisible?.let {
-            val result = MaestroTimer.withTimeout(adjustedToLatestInteraction(timeoutMs ?: optionalLookupTimeoutMs)) {
+            val disappeared = MaestroTimer.withTimeoutSuspend(adjustedToLatestInteraction(timeoutMs ?: optionalLookupTimeoutMs)) {
                 try {
                     findElement(
                         selector = it,
                         timeoutMs = 500L,
                         optional = commandOptional,
                     )
-
-                    // If we got to that point, the element is still visible.
-                    // Returning null to keep waiting.
+                    // Element is still visible
                     null
                 } catch (ignored: MaestroException.ElementNotFound) {
                     // Element was not visible, as we expected
@@ -950,8 +953,7 @@ class Orchestra(
                 }
             }
 
-            // Element was actually visible
-            if (result != true) {
+            if (disappeared != true) {
                 return false
             }
         }
@@ -965,6 +967,7 @@ class Orchestra(
         return try {
             commands
                 .mapIndexed { index, command ->
+                    yield()
                     onCommandStart(index, command)
 
                     val evaluatedCommand = command.evaluateScripts(jsEngine)
@@ -997,6 +1000,8 @@ class Orchestra(
                         logger.info("[Command execution subflow] CommandSkipped: ${ignored.message}")
                         onCommandSkipped(index, command)
                         false
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Throwable) {
                         when (onCommandFailed(index, command, e)) {
                             ErrorResolution.FAIL -> throw e
@@ -1035,12 +1040,18 @@ class Orchestra(
                 if (onStartSuccess) {
                     flowSuccess = executeSubflowCommands(filteredCommands, config)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
                 throw e
             } finally {
-                onCompleteSuccess = subflowConfig?.onFlowComplete?.commands?.let {
-                    executeSubflowCommands(it, config)
-                } ?: true
+                onCompleteSuccess = if (currentCoroutineContext().isActive) {
+                    subflowConfig?.onFlowComplete?.commands?.let {
+                        executeSubflowCommands(it, config)
+                    } ?: true
+                } else {
+                    true
+                }
             }
             onCompleteSuccess && flowSuccess
         } finally {
@@ -1048,7 +1059,7 @@ class Orchestra(
         }
     }
 
-    private fun takeScreenshotCommand(command: TakeScreenshotCommand): Boolean {
+    private suspend fun takeScreenshotCommand(command: TakeScreenshotCommand): Boolean {
         val pathStr = command.path + ".png"
         val fileSink = getFileSink(screenshotsDir, pathStr)
 
@@ -1070,7 +1081,7 @@ class Orchestra(
         return false
     }
 
-    private fun startRecordingCommand(command: StartRecordingCommand): Boolean {
+    private suspend fun startRecordingCommand(command: StartRecordingCommand): Boolean {
         val pathStr = command.path + ".mp4"
         val fileSink = getFileSink(screenshotsDir, pathStr)
         screenRecording = maestro.startScreenRecording(fileSink)
@@ -1082,7 +1093,7 @@ class Orchestra(
         return false
     }
 
-    private fun eraseTextCommand(command: EraseTextCommand): Boolean {
+    private suspend fun eraseTextCommand(command: EraseTextCommand): Boolean {
         val charactersToErase = command.charactersToErase
         maestro.eraseText(charactersToErase ?: MAX_ERASE_CHARACTERS)
         maestro.waitForAppToSettle()
@@ -1090,19 +1101,19 @@ class Orchestra(
         return true
     }
 
-    private fun pressKeyCommand(command: PressKeyCommand): Boolean {
+    private suspend fun pressKeyCommand(command: PressKeyCommand): Boolean {
         maestro.pressKey(command.code)
 
         return true
     }
 
-    private fun openLinkCommand(command: OpenLinkCommand, config: MaestroConfig?): Boolean {
+    private suspend fun openLinkCommand(command: OpenLinkCommand, config: MaestroConfig?): Boolean {
         maestro.openLink(command.link, config?.appId, command.autoVerify ?: false, command.browser ?: false)
 
         return true
     }
 
-    private fun launchAppCommand(command: LaunchAppCommand): Boolean {
+    private suspend fun launchAppCommand(command: LaunchAppCommand): Boolean {
         try {
             if (command.clearKeychain == true) {
                 maestro.clearKeychain()
@@ -1154,23 +1165,26 @@ class Orchestra(
         return true
     }
 
-    private fun setPermissionsCommand(command: SetPermissionsCommand): Boolean {
+    private suspend fun setPermissionsCommand(command: SetPermissionsCommand): Boolean {
         try {
             maestro.setPermissions(command.appId, command.permissions)
         } catch (e: Exception) {
             throw MaestroException.UnableToSetPermissions("Unable to set permissions for app ${command.appId}: ${e.message}", e)
         }
 
-        return true
+        // Setting permissions occurs behind the scenes and won't alter screen state.
+        // Android and iOS provide no mechanism for subscribing to permissions events.
+        return false
     }
 
-    private fun clearKeychainCommand(): Boolean {
+    private suspend fun clearKeychainCommand(): Boolean {
         maestro.clearKeychain()
 
-        return true
+        // No UI effect
+        return false
     }
 
-    private fun inputTextCommand(command: InputTextCommand): Boolean {
+    private suspend fun inputTextCommand(command: InputTextCommand): Boolean {
         if (!maestro.isUnicodeInputSupported()) {
             val isAscii = Charsets.US_ASCII.newEncoder()
                 .canEncode(command.text)
@@ -1185,19 +1199,19 @@ class Orchestra(
         return true
     }
 
-    private fun inputTextRandomCommand(command: InputRandomCommand): Boolean {
+    private suspend fun inputTextRandomCommand(command: InputRandomCommand): Boolean {
         inputTextCommand(InputTextCommand(text = command.genRandomString()))
 
         return true
     }
 
-    private fun assertCommand(command: AssertCommand): Boolean {
+    private suspend fun assertCommand(command: AssertCommand): Boolean {
         return assertConditionCommand(
             command.toAssertConditionCommand()
         )
     }
 
-    private fun tapOnElement(
+    private suspend fun tapOnElement(
         command: TapOnElementCommand,
         retryIfNoChange: Boolean,
         waitUntilVisible: Boolean,
@@ -1236,7 +1250,7 @@ class Orchestra(
         return true
     }
 
-    private fun tapOnPoint(
+    private suspend fun tapOnPoint(
         command: TapOnPointCommand,
         retryIfNoChange: Boolean,
     ): Boolean {
@@ -1251,7 +1265,7 @@ class Orchestra(
         return true
     }
 
-    private fun tapOnPointV2Command(
+    private suspend fun tapOnPointV2Command(
         command: TapOnPointV2Command,
     ): Boolean {
         val point = command.point
@@ -1294,7 +1308,7 @@ class Orchestra(
     }
 
 
-    private fun findElement(
+    private suspend fun findElement(
         selector: ElementSelector,
         optional: Boolean,
         timeoutMs: Long? = null,
@@ -1349,7 +1363,7 @@ class Orchestra(
         )
     }
 
-    private fun findElementViewHierarchy(
+    private suspend fun findElementViewHierarchy(
         selector: ElementSelector?,
         timeout: Long
     ): ViewHierarchy {
@@ -1432,7 +1446,7 @@ class Orchestra(
         selector.containsChild
             ?.let {
                 descriptions += "Contains child: ${it.description()}"
-                relativeFilters += Filters.containsChild(findElement(it, optional = false).element).asFilter()
+                relativeFilters += Filters.containsChild(buildFilter(it).filterFunc)
             }
 
         selector.containsDescendants
@@ -1526,7 +1540,7 @@ class Orchestra(
         )
     }
 
-    private fun swipeCommand(command: SwipeCommand): Boolean {
+    private suspend fun swipeCommand(command: SwipeCommand): Boolean {
         val elementSelector = command.elementSelector
         val direction = command.direction
         val startRelative = command.startRelative
@@ -1576,21 +1590,23 @@ class Orchestra(
         timeMs - (System.currentTimeMillis() - timeMsOfLastInteraction),
     )
 
-    private fun copyTextFromCommand(command: CopyTextFromCommand): Boolean {
+    private suspend fun copyTextFromCommand(command: CopyTextFromCommand): Boolean {
         val result = findElement(command.selector, optional = command.optional)
         copiedText = resolveText(result.element.treeNode.attributes)
             ?: throw MaestroException.UnableToCopyTextFromElement("Element does not contain text to copy: ${result.element}")
 
         jsEngine.setCopiedText(copiedText)
 
-        return true
+        // Hierarchy read and internal variable setting - no UI effect
+        return false
     }
 
     private fun setClipboardCommand(command: SetClipboardCommand): Boolean {
         copiedText = command.text
         jsEngine.setCopiedText(copiedText)
 
-        return true
+        // Internal variable setting - no UI effect
+        return false
     }
 
     private fun resolveText(attributes: MutableMap<String, String>): String? {
@@ -1603,7 +1619,7 @@ class Orchestra(
         }
     }
 
-    private fun pasteText(): Boolean {
+    private suspend fun pasteText(): Boolean {
         copiedText?.let { maestro.inputText(it) }
         return true
     }

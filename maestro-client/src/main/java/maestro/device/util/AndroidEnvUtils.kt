@@ -29,6 +29,12 @@ object AndroidEnvUtils {
             return Paths.get(System.getProperty("user.home"), ".android")
         }
 
+    val androidAvdHome: File
+        get() {
+            System.getenv("ANDROID_AVD_HOME")?.let { return File(it) }
+            return androidUserHome.resolve("avd").toFile()
+        }
+
     /**
      * Returns SDK versions that are used by AVDs present in the system.
      */
@@ -142,10 +148,11 @@ object AndroidEnvUtils {
     fun requireEmulatorBinary(): File {
         val androidHome = androidHome
             ?: throw DeviceError("Could not detect Android home environment variable is not set. Ensure that either ANDROID_HOME or ANDROID_SDK_ROOT is set.")
-        val firstChoice = File(androidHome, "emulator/emulator")
-        val secondChoice = File(androidHome, "tools/emulator")
+        val binaryName = if (EnvUtils.isWindows()) "emulator.exe" else "emulator"
+        val firstChoice = File(androidHome, "emulator/$binaryName")
+        val secondChoice = File(androidHome, "tools/$binaryName")
         return firstChoice.takeIf { it.exists() } ?: secondChoice.takeIf { it.exists() }
-        ?: throw DeviceError("Could not find emulator binary at either of the following paths:\n$firstChoice\n$secondChoice")
+            ?: throw DeviceError("Could not find emulator binary at either of the following paths:\n$firstChoice\n$secondChoice")
     }
 }
 
