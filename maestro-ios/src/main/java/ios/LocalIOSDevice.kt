@@ -129,7 +129,7 @@ class LocalIOSDevice(
         xcTestDevice.takeScreenshot(out, compressed)
     }
 
-    override fun startScreenRecording(out: Sink): Result<IOSScreenRecording, Throwable> {
+    override fun startScreenRecording(out: Sink): IOSScreenRecording {
         return deviceController.startScreenRecording(out)
     }
 

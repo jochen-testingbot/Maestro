@@ -1,21 +1,5 @@
 import Foundation
-
-enum PermissionValue: String, Codable {
-    case allow
-    case deny
-    case unset
-    case unknown
-    // Location-specific
-    case always
-    case inuse
-    case never
-    // Photos-specific
-    case limited
-
-    init(from decoder: Decoder) throws {
-        self = try PermissionValue(rawValue: decoder.singleValueContainer().decode(RawValue.self)) ?? .unknown
-    }
-}
+import MaestroDriverLib
 
 struct SetPermissionsRequest: Codable {
     let permissions: [String : PermissionValue]

@@ -22,12 +22,15 @@ package maestro.cli
 import maestro.MaestroException
 import maestro.cli.analytics.Analytics
 import maestro.cli.analytics.CliCommandRunEvent
+import maestro.cli.analytics.CommandArgsSanitizer
 import maestro.cli.command.BugReportCommand
 import maestro.cli.command.ChatCommand
 import maestro.cli.command.CheckSyntaxCommand
 import maestro.cli.command.CloudCommand
 import maestro.cli.command.DownloadSamplesCommand
 import maestro.cli.command.DriverCommand
+import maestro.cli.command.ListCloudDevicesCommand
+import maestro.cli.command.ListDevicesCommand
 import maestro.cli.command.LoginCommand
 import maestro.cli.command.LogoutCommand
 import maestro.cli.command.McpCommand
@@ -38,6 +41,7 @@ import maestro.cli.command.StartDeviceCommand
 import maestro.cli.command.StudioCommand
 import maestro.cli.command.TestCommand
 import maestro.cli.insights.TestAnalysisManager
+import maestro.cli.mcp.claimMcpStdout
 import maestro.cli.update.Updates
 import maestro.cli.util.ChangeLogUtils
 import maestro.cli.util.ErrorReporter
@@ -64,6 +68,8 @@ import kotlin.system.exitProcess
         BugReportCommand::class,
         StudioCommand::class,
         StartDeviceCommand::class,
+        ListDevicesCommand::class,
+        ListCloudDevicesCommand::class,
         GenerateCompletion::class,
         ChatCommand::class,
         CheckSyntaxCommand::class,
@@ -90,6 +96,9 @@ class App {
     @Option(names = ["--port"], hidden = true)
     var port: Int? = null
 
+    @Option(names = ["--driver-host-port"], hidden = true)
+    var driverHostPort: Int? = null
+
     @Option(
         names = ["--device", "--udid"],
         description = ["(Optional) Device ID to run on explicitly, can be a comma separated list of IDs: --device \"Emulator_1,Emulator_2\" "],
@@ -109,6 +118,15 @@ private fun printVersion() {
 }
 
 fun main(args: Array<String>) {
+    // Must run before any other init: analytics notices, dependency banners, and
+    // kotlin-logging's first-load message will otherwise land on the MCP JSON-RPC
+    // channel and break the handshake for strict clients like Claude Desktop.
+    if (args.firstOrNull() == "mcp") claimMcpStdout()
+
+    // Capture a sanitized representation of the invocation as a super-property on every
+    // PostHog event. Must run before any analytics event can fire.
+    Analytics.commandString = CommandArgsSanitizer.sanitize(args)
+
     // Disable icon in Mac dock
     // https://stackoverflow.com/a/17544259
     try {
