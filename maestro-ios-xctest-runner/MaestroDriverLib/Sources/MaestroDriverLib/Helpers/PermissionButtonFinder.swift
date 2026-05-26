@@ -63,11 +63,19 @@ public final class PermissionButtonFinder {
     ///   - hierarchy: The view hierarchy to search for buttons
     /// - Returns: The result indicating which button frame to tap, or why no action is needed
     public func findButtonToTap(for permission: PermissionValue, in hierarchy: AXElement) -> PermissionButtonResult {
+        // Map extended permission values onto the allow/deny axis that the AX fallback knows about.
+        // These extra cases come from the tb-mods fork (location-specific .always/.inuse/.never,
+        // photos-specific .limited); the AX path treats them as allow/deny equivalents because the
+        // notifications dialog only exposes a binary choice. Dialog-specific button indices for
+        // location/photos are handled by the XCUIElement-based path in SystemPermissionHelper.
+        let effective: PermissionValue
         switch permission {
         case .unset, .unknown:
             return .noActionRequired
-        case .allow, .deny:
-            break
+        case .allow, .always, .inuse, .limited:
+            effective = .allow
+        case .deny, .never:
+            effective = .deny
         }
 
         guard isPermissionDialog(hierarchy) else {
@@ -80,7 +88,7 @@ public final class PermissionButtonFinder {
             return .noButtonsFound
         }
 
-        switch permission {
+        switch effective {
         case .allow:
             if let allowButton = findAllowButton(in: buttons) {
                 return .found(frame: allowButton.frame)
@@ -98,7 +106,7 @@ public final class PermissionButtonFinder {
             // Fallback: Don't Allow is typically the first button (index 0)
             return .found(frame: buttons[0].frame)
 
-        case .unset, .unknown:
+        default:
             return .noActionRequired
         }
     }
