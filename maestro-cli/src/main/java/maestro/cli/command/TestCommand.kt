@@ -545,7 +545,12 @@ class TestCommand : Callable<Int> {
         val userPort = driverHostPort ?: parent?.driverHostPort
         if (userPort != null) {
             if (!isPortAvailable(userPort)) {
-                throw CliError("Requested driver host port $userPort is not available")
+                // Not fatal. For physical iOS devices the host side of this port is
+                // owned by the iproxy/usbmux forward (host:PORT -> device:PORT), so a
+                // bind probe reports it "busy" even though it is exactly the port we
+                // must use: the on-device runner binds PORT (via TEST_RUNNER_PORT) and
+                // the CLI only *connects* through the forward — it never binds locally.
+                logger.info("Requested driver host port $userPort is held on the host (expected with an iproxy/usbmux port forward); using it anyway")
             }
             return userPort
         }
