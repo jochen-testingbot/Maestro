@@ -12,7 +12,6 @@ import maestro.utils.TempFileHandler
 import okio.buffer
 import okio.source
 import org.slf4j.LoggerFactory
-import util.DeviceCtlResponse
 import util.LocalIOSDevice
 import util.LocalSimulatorUtils
 import util.SimctlList
@@ -345,7 +344,12 @@ object DeviceService {
                 runtime.value
                     .filter { it.isAvailable }
                     .map { device(runtimeNameByIdentifier, runtime, it) }
-            } + listIOSConnectedDevices()
+            } + runCatching { listIOSConnectedDevices() }.getOrElse { e ->
+                // A single unparseable/odd entry from devicectl must not take down simulator
+                // listing along with it.
+                logger.warn("Failed to list connected iOS devices via devicectl", e)
+                emptyList()
+            }
     }
 
     fun listIOSConnectedDevices(): List<Device.Connected> {
@@ -355,10 +359,20 @@ object DeviceService {
             val udid = device.hardwareProperties?.udid
             // Accept devices that are either connected via tunnel OR have Developer Mode enabled
             val isDeveloperModeEnabled = device.deviceProperties?.developerModeStatus == "enabled"
-            val isTunnelConnected = device.connectionProperties.tunnelState == DeviceCtlResponse.ConnectionProperties.CONNECTED
+            val isTunnelConnected = device.connectionProperties.isTunnelConnected
 
             if (udid == null || (!isTunnelConnected && !isDeveloperModeEnabled)) {
                 return@mapNotNull null
+            }
+
+            if (!isTunnelConnected) {
+                logger.warn(
+                    "iOS device {} is listed but its devicectl tunnel is '{}' (transport: {}). " +
+                        "Driver installation may fail until the tunnel is up.",
+                    udid,
+                    device.connectionProperties.tunnelState ?: "unknown",
+                    device.connectionProperties.transportType ?: "unknown",
+                )
             }
 
             val description = listOfNotNull(

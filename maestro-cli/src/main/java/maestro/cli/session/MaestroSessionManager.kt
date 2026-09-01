@@ -27,6 +27,7 @@ import device.SimctlIOSDevice
 import ios.xctest.XCTestIOSDevice
 import maestro.Maestro
 import maestro.device.Device
+import maestro.cli.CliError
 import maestro.cli.device.PickDeviceInteractor
 import maestro.cli.driver.DriverBuilder
 import maestro.cli.driver.RealIOSDeviceDriver
@@ -39,8 +40,10 @@ import maestro.drivers.AndroidDriver
 import maestro.drivers.IOSDriver
 import maestro.orchestra.WorkspaceConfig.PlatformConfiguration
 import maestro.orchestra.workspace.WorkspaceExecutionPlanner
+import maestro.utils.HttpClient
 import maestro.utils.TempFileHandler
 import org.slf4j.LoggerFactory
+import util.DeviceCtlResponse
 import util.IOSDeviceType
 import util.XCRunnerCLIUtils
 import xcuitest.XCTestClient
@@ -54,11 +57,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.io.path.pathString
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 object MaestroSessionManager {
     private const val defaultHost = "localhost"
     private const val defaultXctestHost = "127.0.0.1"
     private const val defaultXcTestPort = 22087
+    private const val MAESTRO_XCTEST_HOST = "MAESTRO_XCTEST_HOST"
+    private const val MAESTRO_SKIP_IOS_TUNNEL_CHECK = "MAESTRO_SKIP_IOS_TUNNEL_CHECK"
 
     private val executor = Executors.newScheduledThreadPool(1)
     private val logger = LoggerFactory.getLogger(MaestroSessionManager::class.java)
@@ -397,9 +404,12 @@ object MaestroSessionManager {
         }
 
         val tempFileHandler = TempFileHandler()
+        var xctestHosts = listOf(defaultXctestHost)
         val deviceController = when (deviceType) {
             Device.DeviceType.REAL -> {
                 val device = util.LocalIOSDevice().listDeviceViaDeviceCtl(deviceId)
+                requireReachableRealDevice(deviceId, device.connectionProperties)
+                xctestHosts = resolveRealDeviceXctestHosts(deviceId, device.connectionProperties)
                 val deviceCtlDevice = DeviceControlIOSDevice(deviceId = device.identifier)
                 deviceCtlDevice
             }
@@ -415,7 +425,8 @@ object MaestroSessionManager {
 
         val xcTestInstaller = LocalXCTestInstaller(
             deviceId = deviceId,
-            host = defaultXctestHost,
+            host = xctestHosts.first(),
+            fallbackHosts = xctestHosts.drop(1),
             defaultPort = driverHostPort ?: defaultXcTestPort,
             reinstallDriver = reinstallDriver,
             deviceType = iOSDeviceType,
@@ -427,7 +438,15 @@ object MaestroSessionManager {
 
         val xcTestDriverClient = XCTestDriverClient(
             installer = xcTestInstaller,
-            client = XCTestClient(defaultXctestHost, driverHostPort ?: defaultXcTestPort),
+            client = XCTestClient(xctestHosts.first(), driverHostPort ?: defaultXcTestPort),
+            okHttpClient = HttpClient.build(
+                name = "XCTestDriverClient",
+                // A network-attached device answers over a CoreDevice tunnel rather than a
+                // usbmux forward; 1s to establish a connection is not enough there.
+                connectTimeout = xctestConnectTimeout(deviceType),
+                readTimeout = 200.seconds,
+                callTimeout = 200.seconds,
+            ),
             reinstallDriver = reinstallDriver,
         )
 
@@ -453,6 +472,78 @@ object MaestroSessionManager {
             // Only check isShutdown() if not using custom driver port (avoids accessing driver files)
             openDriver = if (driverHostPort != null) openDriver else (openDriver || xcTestDevice.isShutdown()),
         )
+    }
+
+    private fun xctestConnectTimeout(deviceType: Device.DeviceType): Duration = when (deviceType) {
+        Device.DeviceType.REAL -> 10.seconds
+        else -> 1.seconds
+    }
+
+    /**
+     * A device that dropped off USB and is only paired over Wi-Fi is still reported by
+     * `devicectl list devices`, but every devicectl/xcodebuild call against it fails until
+     * CoreDevice has a tunnel to it. Fail here, with an actionable message, instead of 2-4
+     * minutes later behind a generic driver-startup timeout.
+     *
+     * Only enforced when devicectl actually reports a tunnel state. Older Xcode/devicectl
+     * releases (and pre-CoreDevice devices, i.e. iOS 16 and earlier) omit the field, and those
+     * setups drive the device through xcodebuild's lockdown path with no tunnel at all — so an
+     * absent value must not block the run.
+     */
+    private fun requireReachableRealDevice(
+        deviceId: String,
+        connectionProperties: DeviceCtlResponse.ConnectionProperties,
+    ) {
+        if (connectionProperties.isTunnelConnected) return
+
+        val message = "iOS device $deviceId is paired but not currently reachable: devicectl reports " +
+            "tunnelState='${connectionProperties.tunnelState ?: "unknown"}' " +
+            "(transport: ${connectionProperties.transportType ?: "unknown"}). " +
+            "Connect the device over USB, or — for a network-attached device — make sure it is " +
+            "unlocked, on the same network as this host, and trusted, then confirm it shows as " +
+            "'connected' in `xcrun devicectl list devices`."
+
+        val skipCheck = System.getenv(MAESTRO_SKIP_IOS_TUNNEL_CHECK)?.toBoolean() == true
+        if (connectionProperties.tunnelState == null || skipCheck) {
+            logger.warn("$message (continuing anyway)")
+            return
+        }
+
+        throw CliError("$message\nSet $MAESTRO_SKIP_IOS_TUNNEL_CHECK=true to run anyway.")
+    }
+
+    /**
+     * Addresses to try, in order, when talking to the on-device XCTest runner.
+     *
+     * The runner binds 0.0.0.0, so it is reachable either through a host port forward
+     * (iproxy/usbmux, on loopback) or directly on the device's CoreDevice tunnel address.
+     * Which one is live depends on how the device is attached, so order by what devicectl
+     * reports and keep the other as a fallback: a cabled device whose forward is missing, or
+     * a network device whose tunnel address is stale, still recovers instead of timing out.
+     * [MAESTRO_XCTEST_HOST] pins a single address and disables the fallback.
+     */
+    private fun resolveRealDeviceXctestHosts(
+        deviceId: String,
+        connectionProperties: DeviceCtlResponse.ConnectionProperties,
+    ): List<String> {
+        System.getenv(MAESTRO_XCTEST_HOST)?.takeIf { it.isNotBlank() }?.let { override ->
+            logger.info("Using XCTest runner host $override for $deviceId ($MAESTRO_XCTEST_HOST)")
+            return listOf(override)
+        }
+
+        val tunnelAddress = connectionProperties.tunnelIPAddress?.takeIf { it.isNotBlank() }
+            ?: return listOf(defaultXctestHost)
+
+        return if (connectionProperties.isNetworkAttached) {
+            PrintUtils.message(
+                "Device $deviceId is attached over the network; will reach the XCTest runner on its " +
+                    "tunnel address $tunnelAddress, falling back to $defaultXctestHost (a port forward). " +
+                    "Set $MAESTRO_XCTEST_HOST to pin one address."
+            )
+            listOf(tunnelAddress, defaultXctestHost)
+        } else {
+            listOf(defaultXctestHost, tunnelAddress)
+        }
     }
 
     private fun pickWebDevice(isStudio: Boolean, isHeadless: Boolean, screenSize: String?): Maestro {
