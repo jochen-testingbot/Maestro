@@ -25,6 +25,14 @@ import kotlin.time.Duration.Companion.seconds
 class LocalXCTestInstaller(
     private val deviceId: String,
     private val host: String = "127.0.0.1",
+    /**
+     * Additional addresses to try if [host] never answers. The on-device runner binds
+     * 0.0.0.0, so it can be reached either through a host port forward (iproxy/usbmux, on
+     * loopback) or directly on the device's CoreDevice tunnel address — but which of the two
+     * is live depends on how the device happens to be attached right now. Rather than commit
+     * to one, poll the preferred address first and fall back to the rest.
+     */
+    private val fallbackHosts: List<String> = emptyList(),
     private val deviceType: IOSDeviceType,
     private val defaultPort: Int,
     private val metricsProvider: Metrics = MetricsProvider.getInstance(),
@@ -60,6 +68,12 @@ class LocalXCTestInstaller(
     private val xcRunnerCLIUtils = XCRunnerCLIUtils(tempFileHandler)
 
     private var xcTestProcess: Process? = null
+
+    /** The address that last answered a status check; [host] until a fallback wins. */
+    @Volatile
+    private var activeHost: String = host
+
+    private val candidateHosts: List<String> = (listOf(host) + fallbackHosts).distinct()
 
     override fun uninstall(): Boolean {
         return metrics.measured("operation", mapOf("command" to "uninstall")) {
@@ -109,7 +123,7 @@ class LocalXCTestInstaller(
 
                 repeat(20) {
                     if (ensureOpen()) {
-                        return@measured XCTestClient(host, defaultPort)
+                        return@measured XCTestClient(activeHost, defaultPort)
                     }
                     logger.info("==> Start XCTest runner to continue flow")
                     Thread.sleep(500)
@@ -125,13 +139,21 @@ class LocalXCTestInstaller(
             val startTime = System.currentTimeMillis()
 
             while (System.currentTimeMillis() - startTime < getStartupTimeout()) {
-                runCatching {
-                    if (isChannelAlive()) return@measured XCTestClient(host, defaultPort)
+                for (candidate in candidateHosts) {
+                    runCatching {
+                        if (xcTestDriverStatusCheck(candidate)) {
+                            if (candidate != activeHost) {
+                                logger.info("XCTest runner answered on $candidate, using it for this session")
+                            }
+                            activeHost = candidate
+                            return@measured XCTestClient(candidate, defaultPort)
+                        }
+                    }
                 }
                 Thread.sleep(500)
             }
 
-            throw IOSDriverTimeoutException("iOS driver not ready in time, consider increasing timeout by configuring MAESTRO_DRIVER_STARTUP_TIMEOUT env variable")
+            throw IOSDriverTimeoutException(driverStartupTimeoutMessage())
         }
     }
 
@@ -139,7 +161,49 @@ class LocalXCTestInstaller(
 
     private fun getStartupTimeout(): Long = runCatching {
         System.getenv(MAESTRO_DRIVER_STARTUP_TIMEOUT).toLong()
-    }.getOrDefault(SERVER_LAUNCH_TIMEOUT_MS)
+    }.getOrDefault(
+        when (deviceType) {
+            // Installing and launching the runner over a network tunnel (Wi-Fi attached
+            // device) is several times slower than over USB.
+            IOSDeviceType.REAL -> REAL_DEVICE_SERVER_LAUNCH_TIMEOUT_MS
+            IOSDeviceType.SIMULATOR -> SERVER_LAUNCH_TIMEOUT_MS
+        }
+    )
+
+    /**
+     * The generic "not ready in time" message is ambiguous: the runner may have failed to
+     * install/launch, or it may be running fine and unreachable at [host]:[defaultPort]
+     * (a dead iproxy/usbmux forward, which is what happens when the device drops off USB
+     * and is only attached over Wi-Fi). Surface the tail of the runner log so the two are
+     * distinguishable without digging through ~/.maestro.
+     */
+    private fun driverStartupTimeoutMessage(): String {
+        val logFile = runCatching {
+            logsDir.listFiles { file -> file.name.startsWith("xctest_runner_") && file.extension == "log" }
+                ?.maxByOrNull { it.lastModified() }
+        }.getOrNull()
+        val logTail = runCatching {
+            logFile?.takeIf { it.exists() }
+                ?.readLines()
+                ?.takeLast(XCTEST_LOG_TAIL_LINES)
+                ?.joinToString(System.lineSeparator())
+        }.getOrNull()
+
+        val tried = candidateHosts.joinToString(", ") { "$it:$defaultPort" }
+        return buildString {
+            append("iOS driver not ready in time: no response from the XCTest runner after ")
+            append("${getStartupTimeout()} ms. Tried $tried. ")
+            append("Either the runner failed to start on $deviceId, or it is running but unreachable ")
+            append("(check your iproxy/usbmux port forward, and whether the device is attached over USB or the network). ")
+            append("Consider increasing the timeout with the $MAESTRO_DRIVER_STARTUP_TIMEOUT env variable.")
+            if (logFile != null && !logTail.isNullOrBlank()) {
+                append(System.lineSeparator())
+                append("Last $XCTEST_LOG_TAIL_LINES lines of ${logFile.absolutePath}:")
+                append(System.lineSeparator())
+                append(logTail)
+            }
+        }
+    }
 
     override fun isChannelAlive(): Boolean {
         return metrics.measured("operation", mapOf("command" to "isChannelAlive")) {
@@ -157,12 +221,12 @@ class LocalXCTestInstaller(
         return result
     }
 
-    private fun xcTestDriverStatusCheck(): Boolean {
-        logger.info("[Start] Perform XCUITest driver status check on $deviceId")
+    private fun xcTestDriverStatusCheck(targetHost: String = activeHost): Boolean {
+        logger.info("[Start] Perform XCUITest driver status check on $deviceId at $targetHost:$defaultPort")
         fun xctestAPIBuilder(pathSegment: String): HttpUrl.Builder {
             return HttpUrl.Builder()
                 .scheme("http")
-                .host("127.0.0.1")
+                .host(targetHost)
                 .addPathSegment(pathSegment)
                 .port(defaultPort)
         }
@@ -180,11 +244,11 @@ class LocalXCTestInstaller(
 
         val checkSuccessful = try {
             httpClient.newCall(request).execute().use {
-                logger.info("[Done] Perform XCUITest driver status check on $deviceId")
+                logger.info("[Done] Perform XCUITest driver status check on $deviceId at $targetHost:$defaultPort")
                 it.isSuccessful
             }
         } catch (ignore: IOException) {
-            logger.info("[Failed] Perform XCUITest driver status check on $deviceId, exception: $ignore")
+            logger.info("[Failed] Perform XCUITest driver status check on $deviceId at $targetHost:$defaultPort, exception: $ignore")
             false
         }
 
@@ -266,6 +330,8 @@ class LocalXCTestInstaller(
         const val UI_TEST_RUNNER_APP_BUNDLE_ID = "dev.mobile.maestro-driver-iosUITests.xctrunner"
 
         private const val SERVER_LAUNCH_TIMEOUT_MS = 120000L
+        private const val REAL_DEVICE_SERVER_LAUNCH_TIMEOUT_MS = 240000L
+        private const val XCTEST_LOG_TAIL_LINES = 30
         private const val MAESTRO_DRIVER_STARTUP_TIMEOUT = "MAESTRO_DRIVER_STARTUP_TIMEOUT"
     }
 

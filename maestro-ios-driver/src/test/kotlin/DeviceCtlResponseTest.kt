@@ -27,6 +27,74 @@ class DeviceCtlResponseTest {
         assertThat(connectedDevices).isNotEmpty()
     }
 
+    @Test
+    fun `test if network attached and legacy devices deserialize`() {
+        // given
+        val deviceOutput = Files.createTempFile("output", ".json").apply {
+            writeText(networkAttachedDeviceOutput())
+        }
+        val deviceCtlProcess = mockk<DeviceCtlProcess>()
+        every { deviceCtlProcess.devicectlDevicesOutput() } returns deviceOutput.toFile()
+
+        // when
+        val devices = LocalIOSDevice(deviceCtlProcess).listDeviceViaDeviceCtl()
+
+        // then
+        val networkDevice = devices.first { it.hardwareProperties?.udid == "00008120-0014485601E3C01E" }
+        assertThat(networkDevice.connectionProperties.isNetworkAttached).isTrue()
+        assertThat(networkDevice.connectionProperties.isTunnelConnected).isTrue()
+        assertThat(networkDevice.connectionProperties.tunnelIPAddress).isEqualTo("fdcd:3155:df16::1")
+
+        // devicectl releases predating CoreDevice tunnels omit these fields entirely
+        val legacyDevice = devices.first { it.hardwareProperties?.udid == "00008030-000000000000001E" }
+        assertThat(legacyDevice.connectionProperties.tunnelState).isNull()
+        assertThat(legacyDevice.connectionProperties.isNetworkAttached).isFalse()
+        assertThat(legacyDevice.connectionProperties.isTunnelConnected).isFalse()
+    }
+
+    private fun networkAttachedDeviceOutput(): String {
+        return """
+           {
+             "result" : {
+               "devices" : [
+                 {
+                   "identifier" : "6986451F-A2FF-48DE-A70E-45E06E1F1446",
+                   "connectionProperties" : {
+                     "pairingState" : "paired",
+                     "transportType" : "localNetwork",
+                     "tunnelIPAddress" : "fdcd:3155:df16::1",
+                     "tunnelState" : "connected",
+                     "tunnelTransportProtocol" : "tcp"
+                   },
+                   "deviceProperties" : {
+                     "developerModeStatus" : "enabled",
+                     "name" : "iPhone 15",
+                     "osVersionNumber" : "17.5.1"
+                   },
+                   "hardwareProperties" : {
+                     "udid" : "00008120-0014485601E3C01E"
+                   }
+                 },
+                 {
+                   "identifier" : "1186451F-A2FF-48DE-A70E-45E06E1F1447",
+                   "connectionProperties" : {
+                     "pairingState" : "paired"
+                   },
+                   "deviceProperties" : {
+                     "developerModeStatus" : "enabled",
+                     "name" : "iPhone 8",
+                     "osVersionNumber" : "16.7.8"
+                   },
+                   "hardwareProperties" : {
+                     "udid" : "00008030-000000000000001E"
+                   }
+                 }
+               ]
+             }
+           }
+       """.trimIndent()
+    }
+
     private fun getDeviceCtlOutput(): String {
        return """
            {

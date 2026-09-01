@@ -13,12 +13,15 @@ object CommandLineUtils {
     private val nullFile = File(if (isWindows) "NUL" else "/dev/null")
     private val logger = LoggerFactory.getLogger(CommandLineUtils::class.java)
 
+    private const val DEFAULT_TIMEOUT_SECONDS = 5L * 60
+
     @Suppress("SpreadOperator")
     fun runCommand(
             parts: List<String>,
             waitForCompletion: Boolean = true,
             outputFile: File? = null,
-            params: Map<String, String> = emptyMap()
+            params: Map<String, String> = emptyMap(),
+            timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
     ): Process {
         logger.info("Running command line operation: $parts with $params")
 
@@ -37,8 +40,11 @@ object CommandLineUtils {
         val process = processBuilder.start()
 
         if (waitForCompletion) {
-            if (!process.waitFor(5, TimeUnit.MINUTES)) {
-                throw TimeoutException()
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                process.destroy()
+                throw TimeoutException(
+                    "Command timed out after $timeoutSeconds seconds: ${parts.joinToString(" ")}"
+                )
             }
 
             if (process.exitValue() != 0) {

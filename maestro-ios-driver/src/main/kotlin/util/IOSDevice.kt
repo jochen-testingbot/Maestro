@@ -21,15 +21,24 @@ data class DeviceCtlResponse(
         val identifier: String,
         val deviceProperties: DeviceProperties?,
         val hardwareProperties: HardwareProperties?,
-        val connectionProperties: ConnectionProperties,
+        val connectionProperties: ConnectionProperties = ConnectionProperties(),
     )
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     data class ConnectionProperties(
-        val tunnelState: String,
+        val tunnelState: String? = null,
+        val transportType: String? = null,
+        val tunnelIPAddress: String? = null,
     ) {
+        val isTunnelConnected: Boolean get() = tunnelState == CONNECTED
+
+        /** True when the device is only reachable over the network (no USB cable). */
+        val isNetworkAttached: Boolean get() = transportType == TRANSPORT_LOCAL_NETWORK
+
         companion object {
             const val CONNECTED  = "connected"
+            const val TRANSPORT_LOCAL_NETWORK = "localNetwork"
+            const val TRANSPORT_WIRED = "wired"
         }
     }
 

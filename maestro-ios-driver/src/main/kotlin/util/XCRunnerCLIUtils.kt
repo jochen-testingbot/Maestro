@@ -19,6 +19,11 @@ class XCRunnerCLIUtils(private val tempFileHandler: TempFileHandler = TempFileHa
 
     private val dateFormatter by lazy { DateTimeFormatter.ofPattern(XCTEST_LOG_DATE_FORMAT) }
 
+    companion object {
+        private const val MAESTRO_XCODEBUILD_DESTINATION_TIMEOUT = "MAESTRO_XCODEBUILD_DESTINATION_TIMEOUT"
+        private const val DEFAULT_DESTINATION_TIMEOUT_SECONDS = 120L
+    }
+
     fun listApps(deviceId: String): Set<String> {
         val process = Runtime.getRuntime().exec(arrayOf("bash", "-c", "xcrun simctl listapps $deviceId | plutil -convert json - -o -"))
 
@@ -101,6 +106,10 @@ class XCRunnerCLIUtils(private val tempFileHandler: TempFileHandler = TempFileHa
         return runningApps(deviceId)[bundleId]
     }
 
+    private fun destinationTimeoutSeconds(): Long = runCatching {
+        System.getenv(MAESTRO_XCODEBUILD_DESTINATION_TIMEOUT).toLong()
+    }.getOrDefault(DEFAULT_DESTINATION_TIMEOUT_SECONDS)
+
     fun runXcTestWithoutBuild(
         deviceId: String,
         xcTestRunFilePath: String,
@@ -123,6 +132,11 @@ class XCRunnerCLIUtils(private val tempFileHandler: TempFileHandler = TempFileHa
                 xcTestRunFilePath,
                 "-destination",
                 "id=$deviceId",
+                // A network-attached device stays "unavailable" until Xcode has brought the
+                // CoreDevice tunnel up, which routinely takes longer than xcodebuild's default
+                // destination-resolution window.
+                "-destination-timeout",
+                destinationTimeoutSeconds().toString(),
                 "-derivedDataPath",
                 logOutputDir.absolutePathString()
             ),
