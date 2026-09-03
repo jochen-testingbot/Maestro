@@ -33,6 +33,14 @@ class LocalXCTestInstaller(
      * to one, poll the preferred address first and fall back to the rest.
      */
     private val fallbackHosts: List<String> = emptyList(),
+    /**
+     * Re-queried while waiting for the runner, to pick up addresses that do not exist yet at
+     * construction time. A CoreDevice tunnel to a network-attached device is owned by whoever
+     * opened it and disappears when that process exits, and each tunnel gets its own address —
+     * so the address of the tunnel that `xcodebuild test-without-building` opens for this very
+     * session can only be observed after it has started.
+     */
+    private val additionalHostsProvider: () -> List<String> = { emptyList() },
     private val deviceType: IOSDeviceType,
     private val defaultPort: Int,
     private val metricsProvider: Metrics = MetricsProvider.getInstance(),
@@ -73,7 +81,22 @@ class LocalXCTestInstaller(
     @Volatile
     private var activeHost: String = host
 
-    private val candidateHosts: List<String> = (listOf(host) + fallbackHosts).distinct()
+    private var candidateHosts: List<String> = (listOf(host) + fallbackHosts).distinct()
+
+    /** Why each candidate last refused us, for the give-up message. */
+    private val lastFailureByHost = linkedMapOf<String, String>()
+
+    private fun refreshCandidateHosts() {
+        val discovered = runCatching { additionalHostsProvider() }.getOrElse { e ->
+            logger.debug("Could not refresh XCTest runner addresses", e)
+            emptyList()
+        }
+        val added = discovered.filter { it.isNotBlank() && it !in candidateHosts }
+        if (added.isNotEmpty()) {
+            logger.info("Discovered additional XCTest runner address(es) while waiting: $added")
+            candidateHosts = candidateHosts + added
+        }
+    }
 
     override fun uninstall(): Boolean {
         return metrics.measured("operation", mapOf("command" to "uninstall")) {
@@ -137,8 +160,15 @@ class LocalXCTestInstaller(
             logger.info("[Done] Install XCUITest runner on $deviceId")
 
             val startTime = System.currentTimeMillis()
+            var nextRefresh = 0L
 
             while (System.currentTimeMillis() - startTime < getStartupTimeout()) {
+                val elapsed = System.currentTimeMillis() - startTime
+                if (elapsed >= nextRefresh) {
+                    refreshCandidateHosts()
+                    nextRefresh = elapsed + HOST_REFRESH_INTERVAL_MS
+                }
+
                 for (candidate in candidateHosts) {
                     runCatching {
                         if (xcTestDriverStatusCheck(candidate)) {
@@ -148,7 +178,7 @@ class LocalXCTestInstaller(
                             activeHost = candidate
                             return@measured XCTestClient(candidate, defaultPort)
                         }
-                    }
+                    }.onFailure { lastFailureByHost[candidate] = it.toString() }
                 }
                 Thread.sleep(500)
             }
@@ -189,13 +219,19 @@ class LocalXCTestInstaller(
                 ?.joinToString(System.lineSeparator())
         }.getOrNull()
 
-        val tried = candidateHosts.joinToString(", ") { "$it:$defaultPort" }
+        val tried = candidateHosts.joinToString(System.lineSeparator()) { candidate ->
+            "  $candidate:$defaultPort — ${lastFailureByHost[candidate] ?: "no response"}"
+        }
         return buildString {
             append("iOS driver not ready in time: no response from the XCTest runner after ")
-            append("${getStartupTimeout()} ms. Tried $tried. ")
-            append("Either the runner failed to start on $deviceId, or it is running but unreachable ")
-            append("(check your iproxy/usbmux port forward, and whether the device is attached over USB or the network). ")
+            append("${getStartupTimeout()} ms. Either the runner failed to start on $deviceId, or it is ")
+            append("running but unreachable (check your iproxy/usbmux port forward, and whether the device ")
+            append("is attached over USB or the network). ")
             append("Consider increasing the timeout with the $MAESTRO_DRIVER_STARTUP_TIMEOUT env variable.")
+            append(System.lineSeparator())
+            append("Addresses tried:")
+            append(System.lineSeparator())
+            append(tried)
             if (logFile != null && !logTail.isNullOrBlank()) {
                 append(System.lineSeparator())
                 append("Last $XCTEST_LOG_TAIL_LINES lines of ${logFile.absolutePath}:")
@@ -249,6 +285,7 @@ class LocalXCTestInstaller(
             }
         } catch (ignore: IOException) {
             logger.info("[Failed] Perform XCUITest driver status check on $deviceId at $targetHost:$defaultPort, exception: $ignore")
+            lastFailureByHost[targetHost] = ignore.toString()
             false
         }
 
@@ -332,6 +369,7 @@ class LocalXCTestInstaller(
         private const val SERVER_LAUNCH_TIMEOUT_MS = 120000L
         private const val REAL_DEVICE_SERVER_LAUNCH_TIMEOUT_MS = 240000L
         private const val XCTEST_LOG_TAIL_LINES = 30
+        private const val HOST_REFRESH_INTERVAL_MS = 5000L
         private const val MAESTRO_DRIVER_STARTUP_TIMEOUT = "MAESTRO_DRIVER_STARTUP_TIMEOUT"
     }
 

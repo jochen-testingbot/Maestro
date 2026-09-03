@@ -29,6 +29,8 @@ data class DeviceCtlResponse(
         val tunnelState: String? = null,
         val transportType: String? = null,
         val tunnelIPAddress: String? = null,
+        /** mDNS names the device answers to, e.g. `iPhone.coredevice.local`. */
+        val localHostnames: List<String> = emptyList(),
     ) {
         val isTunnelConnected: Boolean get() = tunnelState == CONNECTED
 

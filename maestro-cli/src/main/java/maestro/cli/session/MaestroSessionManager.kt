@@ -427,6 +427,11 @@ object MaestroSessionManager {
             deviceId = deviceId,
             host = xctestHosts.first(),
             fallbackHosts = xctestHosts.drop(1),
+            additionalHostsProvider = if (deviceType == Device.DeviceType.REAL && !isXctestHostPinned()) {
+                { currentDeviceAddresses(deviceId) }
+            } else {
+                { emptyList() }
+            },
             defaultPort = driverHostPort ?: defaultXcTestPort,
             reinstallDriver = reinstallDriver,
             deviceType = iOSDeviceType,
@@ -472,6 +477,26 @@ object MaestroSessionManager {
             // Only check isShutdown() if not using custom driver port (avoids accessing driver files)
             openDriver = if (driverHostPort != null) openDriver else (openDriver || xcTestDevice.isShutdown()),
         )
+    }
+
+    private fun isXctestHostPinned(): Boolean =
+        !System.getenv(MAESTRO_XCTEST_HOST).isNullOrBlank()
+
+    /**
+     * The device's currently reachable addresses, re-read from devicectl on every call.
+     *
+     * A CoreDevice tunnel is owned by the process that opened it and torn down when that
+     * process exits, and every tunnel gets a fresh address — so the address reported before
+     * the session starts belongs to whatever tool ran last (an installer, say), not to the
+     * `xcodebuild test-without-building` process that is about to host our runner. Polling
+     * for it lets the session pick up its own tunnel once xcodebuild has opened one.
+     */
+    private fun currentDeviceAddresses(deviceId: String): List<String> {
+        val connectionProperties = util.LocalIOSDevice().listDeviceViaDeviceCtl(deviceId).connectionProperties
+        if (!connectionProperties.isTunnelConnected) return emptyList()
+
+        return listOfNotNull(connectionProperties.tunnelIPAddress?.takeIf { it.isNotBlank() }) +
+            connectionProperties.localHostnames.filter { it.isNotBlank() }
     }
 
     private fun xctestConnectTimeout(deviceType: Device.DeviceType): Duration = when (deviceType) {
