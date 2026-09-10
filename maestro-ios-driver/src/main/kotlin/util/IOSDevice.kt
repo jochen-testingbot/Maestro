@@ -56,3 +56,19 @@ data class DeviceCtlResponse(
         val udid: String?
     )
 }
+
+/** Response of `xcrun devicectl device info apps`. */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class DeviceCtlAppsResponse(
+    val result: Result = Result()
+) {
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class Result(
+        val apps: List<App> = emptyList()
+    )
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class App(
+        val bundleIdentifier: String? = null
+    )
+}
