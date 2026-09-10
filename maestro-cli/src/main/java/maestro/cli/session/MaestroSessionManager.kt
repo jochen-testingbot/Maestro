@@ -407,7 +407,7 @@ object MaestroSessionManager {
         var xctestHosts = listOf(defaultXctestHost)
         val deviceController = when (deviceType) {
             Device.DeviceType.REAL -> {
-                val device = util.LocalIOSDevice().listDeviceViaDeviceCtl(deviceId)
+                val device = util.RealIOSDeviceResolver().requireByUdid(deviceId)
                 requireReachableRealDevice(deviceId, device.connectionProperties)
                 xctestHosts = resolveRealDeviceXctestHosts(deviceId, device.connectionProperties)
                 val deviceCtlDevice = DeviceControlIOSDevice(deviceId = device.identifier)
@@ -456,10 +456,16 @@ object MaestroSessionManager {
         )
 
         val xcRunnerCLIUtils = XCRunnerCLIUtils(tempFileHandler = tempFileHandler)
+        // `simctl` has no notion of a physical device and silently returns nothing for one, so a
+        // real device has to be asked through devicectl instead.
+        val installedAppsProvider: () -> Set<String> = when (deviceType) {
+            Device.DeviceType.REAL -> { { util.LocalIOSDevice().listApps(deviceId) } }
+            else -> { { xcRunnerCLIUtils.listApps(deviceId) } }
+        }
         val xcTestDevice = XCTestIOSDevice(
             deviceId = deviceId,
             client = xcTestDriverClient,
-            getInstalledApps = { xcRunnerCLIUtils.listApps(deviceId) },
+            getInstalledApps = installedAppsProvider,
         )
 
         val iosDriver = IOSDriver(
@@ -490,9 +496,14 @@ object MaestroSessionManager {
      * the session starts belongs to whatever tool ran last (an installer, say), not to the
      * `xcodebuild test-without-building` process that is about to host our runner. Polling
      * for it lets the session pick up its own tunnel once xcodebuild has opened one.
+     *
+     * Devices CoreDevice does not manage never have a tunnel, so this yields nothing for them and
+     * the runner is reached on the port forward instead.
      */
     private fun currentDeviceAddresses(deviceId: String): List<String> {
-        val connectionProperties = util.LocalIOSDevice().listDeviceViaDeviceCtl(deviceId).connectionProperties
+        val connectionProperties = util.RealIOSDeviceResolver().findByUdid(deviceId)
+            ?.connectionProperties
+            ?: return emptyList()
         if (!connectionProperties.isTunnelConnected) return emptyList()
 
         return listOfNotNull(connectionProperties.tunnelIPAddress?.takeIf { it.isNotBlank() }) +
@@ -521,15 +532,26 @@ object MaestroSessionManager {
     ) {
         if (connectionProperties.isTunnelConnected) return
 
+        // No tunnel state at all means CoreDevice never had an opinion about this device — either
+        // an older devicectl, or a device it declined to pair with. Both are driven over lockdown,
+        // where there is no tunnel to wait for, so there is nothing here to warn about.
+        if (connectionProperties.tunnelState == null) {
+            logger.info(
+                "iOS device {} has no CoreDevice tunnel; it will be driven over the legacy path " +
+                    "and the XCTest runner reached through a port forward.",
+                deviceId,
+            )
+            return
+        }
+
         val message = "iOS device $deviceId is paired but not currently reachable: devicectl reports " +
-            "tunnelState='${connectionProperties.tunnelState ?: "unknown"}' " +
+            "tunnelState='${connectionProperties.tunnelState}' " +
             "(transport: ${connectionProperties.transportType ?: "unknown"}). " +
             "Connect the device over USB, or — for a network-attached device — make sure it is " +
             "unlocked, on the same network as this host, and trusted, then confirm it shows as " +
             "'connected' in `xcrun devicectl list devices`."
 
-        val skipCheck = System.getenv(MAESTRO_SKIP_IOS_TUNNEL_CHECK)?.toBoolean() == true
-        if (connectionProperties.tunnelState == null || skipCheck) {
+        if (System.getenv(MAESTRO_SKIP_IOS_TUNNEL_CHECK)?.toBoolean() == true) {
             logger.warn("$message (continuing anyway)")
             return
         }

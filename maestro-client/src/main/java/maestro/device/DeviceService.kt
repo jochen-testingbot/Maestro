@@ -12,9 +12,11 @@ import maestro.utils.TempFileHandler
 import okio.buffer
 import okio.source
 import org.slf4j.LoggerFactory
+import util.DeviceCtlResponse
 import util.LocalIOSDevice
 import util.LocalSimulatorUtils
 import util.SimctlList
+import util.XcDeviceLister
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -353,9 +355,15 @@ object DeviceService {
     }
 
     fun listIOSConnectedDevices(): List<Device.Connected> {
-        val connectedIphoneList = LocalIOSDevice().listDeviceViaDeviceCtl()
+        val connectedIphoneList = runCatching { LocalIOSDevice().listDeviceViaDeviceCtl() }
+            .getOrElse { e ->
+                // devicectl being unusable must not stop us from looking for devices it would
+                // not have been able to report anyway.
+                logger.warn("Failed to list connected iOS devices via devicectl", e)
+                emptyList()
+            }
 
-        return connectedIphoneList.mapNotNull { device ->
+        val devicesFromDeviceCtl = connectedIphoneList.mapNotNull { device ->
             val udid = device.hardwareProperties?.udid
             // Accept devices that are either connected via tunnel OR have Developer Mode enabled
             val isDeveloperModeEnabled = device.deviceProperties?.developerModeStatus == "enabled"
@@ -389,7 +397,77 @@ object DeviceService {
                 deviceSpec = DeviceSpec.Ios.DEFAULT
             )
         }
+
+        return devicesFromDeviceCtl + legacyIOSConnectedDevices(connectedIphoneList, devicesFromDeviceCtl)
     }
+
+    /**
+     * Devices that CoreDevice will not talk to, found through `xcrun xcdevice list` instead.
+     *
+     * CoreDevice refuses to pair with anything older than iOS 17. Such a device still shows up in
+     * `devicectl list devices`, but as a stub: `pairingState: unsupported` and no
+     * `hardwareProperties.udid`, so the mapping above drops it and `maestro test` concludes that
+     * no device is connected. The device itself is perfectly driveable — the CLI launches the
+     * XCTest runner with `xcodebuild test-without-building`, which reaches it over the legacy
+     * lockdown path — so the gap is purely one of discovery.
+     *
+     * Only consulted when devicectl came up short, because `xcdevice` waits on every attached
+     * device before answering and this sits on the startup path of every run. A UDID-less devicectl
+     * entry is precisely the signature of a device CoreDevice turned down; a host with no devices
+     * attached, or one whose devices all resolved, pays nothing.
+     */
+    private fun legacyIOSConnectedDevices(
+        deviceCtlEntries: List<DeviceCtlResponse.Device>,
+        alreadyFound: List<Device.Connected>,
+    ): List<Device.Connected> {
+        if (!shouldQueryXcDevice(deviceCtlEntries)) return emptyList()
+
+        val entries = runCatching { XcDeviceLister().listPhysicalIOSDevices() }
+            .getOrElse { e ->
+                logger.warn("Failed to list connected iOS devices via xcdevice", e)
+                return emptyList()
+            }
+
+        val knownIds = alreadyFound.map { it.instanceId }.toSet()
+        return entries
+            .filter { it.identifier !in knownIds }
+            .map { entry ->
+                val udid = requireNotNull(entry.identifier)
+                logger.info(
+                    "iOS device {} ({}, iOS {}) is not managed by CoreDevice; discovered via xcdevice over {}.",
+                    udid,
+                    entry.modelName ?: "unknown model",
+                    entry.osVersionNumber ?: "unknown version",
+                    entry.connectionInterface ?: "unknown interface",
+                )
+
+                val description = listOfNotNull(
+                    entry.name,
+                    entry.osVersionNumber,
+                    udid,
+                ).joinToString(" - ")
+
+                Device.Connected(
+                    instanceId = udid,
+                    description = description,
+                    platform = Platform.IOS,
+                    deviceType = Device.DeviceType.REAL,
+                    deviceSpec = DeviceSpec.Ios.DEFAULT
+                )
+            }
+    }
+
+    internal fun shouldQueryXcDevice(deviceCtlEntries: List<DeviceCtlResponse.Device>): Boolean {
+        if (System.getenv(MAESTRO_DISABLE_LEGACY_IOS_DISCOVERY)?.toBoolean() == true) return false
+        // Escape hatch for hosts where devicectl omits the unsupported device altogether rather
+        // than reporting a stub for it.
+        if (System.getenv(MAESTRO_FORCE_LEGACY_IOS_DISCOVERY)?.toBoolean() == true) return true
+
+        return deviceCtlEntries.any { it.hardwareProperties?.udid.isNullOrBlank() }
+    }
+
+    private const val MAESTRO_DISABLE_LEGACY_IOS_DISCOVERY = "MAESTRO_DISABLE_LEGACY_IOS_DISCOVERY"
+    private const val MAESTRO_FORCE_LEGACY_IOS_DISCOVERY = "MAESTRO_FORCE_LEGACY_IOS_DISCOVERY"
 
     private fun device(
       runtimeNameByIdentifier: Map<String, String>,
