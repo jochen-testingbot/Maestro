@@ -578,8 +578,13 @@ object MaestroSessionManager {
             return listOf(override)
         }
 
+        // Last resort, appended to whatever else we try: the device's own address on the local
+        // network. The runner binds 0.0.0.0, so this reaches it with no port forward and no
+        // tunnel -- the one candidate that survives both being broken.
+        val lanAddress = runCatching { util.DeviceLanAddressResolver.resolve(deviceId) }.getOrNull()
+
         val tunnelAddress = connectionProperties.tunnelIPAddress?.takeIf { it.isNotBlank() }
-            ?: return listOf(defaultXctestHost)
+            ?: return listOfNotNull(defaultXctestHost, lanAddress)
 
         return if (connectionProperties.isNetworkAttached) {
             PrintUtils.message(
@@ -587,9 +592,9 @@ object MaestroSessionManager {
                     "tunnel address $tunnelAddress, falling back to $defaultXctestHost (a port forward). " +
                     "Set $MAESTRO_XCTEST_HOST to pin one address."
             )
-            listOf(tunnelAddress, defaultXctestHost)
+            listOfNotNull(tunnelAddress, defaultXctestHost, lanAddress)
         } else {
-            listOf(defaultXctestHost, tunnelAddress)
+            listOfNotNull(defaultXctestHost, tunnelAddress, lanAddress)
         }
     }
 

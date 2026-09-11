@@ -22,6 +22,53 @@ class XCRunnerCLIUtils(private val tempFileHandler: TempFileHandler = TempFileHa
     companion object {
         private const val MAESTRO_XCODEBUILD_DESTINATION_TIMEOUT = "MAESTRO_XCODEBUILD_DESTINATION_TIMEOUT"
         private const val DEFAULT_DESTINATION_TIMEOUT_SECONDS = 120L
+        private const val SHOW_DESTINATIONS_TIMEOUT_SECONDS = 60L
+    }
+
+    /**
+     * Ask xcodebuild whether it can resolve [deviceId] as a destination for this xctestrun, and
+     * if not, why. `test-without-building` only reports that after it has given up waiting for
+     * the destination (two minutes by default), and it reports it into its own log file rather
+     * than to the caller — so the device's own explanation for refusing the run ("Development
+     * services need to be enabled", "is currently locked", a stale pairing) stays buried until
+     * somebody goes digging in ~/.maestro.
+     *
+     * `-showdestinations` lists destinations and exits; it does not run the tests.
+     *
+     * Returns null when the device is offered as a destination without complaint.
+     */
+    fun destinationProblem(deviceId: String, xcTestRunFilePath: String): String? {
+        val process = ProcessBuilder(
+            "xcodebuild",
+            "test-without-building",
+            "-xctestrun",
+            xcTestRunFilePath,
+            "-destination",
+            "id=$deviceId",
+            "-showdestinations",
+        ).redirectErrorStream(true).start()
+
+        val output = StringBuilder()
+        val drain = Thread { process.inputStream.bufferedReader().forEachLine { output.appendLine(it) } }
+        drain.isDaemon = true
+        drain.start()
+
+        if (!process.waitFor(SHOW_DESTINATIONS_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            return "`xcodebuild -showdestinations` did not answer within $SHOW_DESTINATIONS_TIMEOUT_SECONDS seconds"
+        }
+        drain.join(TimeUnit.SECONDS.toMillis(1))
+
+        // Entries look like:
+        //   { platform:iOS, arch:arm64e, id:<udid>, name:iPhone }
+        //   { platform:iOS, arch:arm64e, id:<udid>, name:iPhone, error:iPhone is not available because ... }
+        val entries = output.lines().filter { it.contains("id:$deviceId") }
+        if (entries.isEmpty()) {
+            return "xcodebuild does not offer $deviceId as a destination for this xctestrun"
+        }
+
+        val failing = entries.firstOrNull { it.contains("error:") } ?: return null
+        return failing.substringAfter("error:").substringBeforeLast("}").trim()
     }
 
     fun listApps(deviceId: String): Set<String> {
