@@ -27,7 +27,6 @@ import device.SimctlIOSDevice
 import ios.xctest.XCTestIOSDevice
 import maestro.Maestro
 import maestro.device.Device
-import maestro.cli.CliError
 import maestro.cli.device.PickDeviceInteractor
 import maestro.cli.driver.DriverBuilder
 import maestro.cli.driver.RealIOSDeviceDriver
@@ -65,7 +64,6 @@ object MaestroSessionManager {
     private const val defaultXctestHost = "127.0.0.1"
     private const val defaultXcTestPort = 22087
     private const val MAESTRO_XCTEST_HOST = "MAESTRO_XCTEST_HOST"
-    private const val MAESTRO_SKIP_IOS_TUNNEL_CHECK = "MAESTRO_SKIP_IOS_TUNNEL_CHECK"
 
     private val executor = Executors.newScheduledThreadPool(1)
     private val logger = LoggerFactory.getLogger(MaestroSessionManager::class.java)
@@ -407,9 +405,13 @@ object MaestroSessionManager {
         var xctestHosts = listOf(defaultXctestHost)
         val deviceController = when (deviceType) {
             Device.DeviceType.REAL -> {
-                val device = util.RealIOSDeviceResolver().requireByUdid(deviceId)
-                requireReachableRealDevice(deviceId, device.connectionProperties)
-                xctestHosts = resolveRealDeviceXctestHosts(deviceId, device.connectionProperties)
+                val resolver = util.RealIOSDeviceResolver()
+                val device = resolver.requireByUdid(deviceId)
+                // Bringing the tunnel up gives it a fresh address, so the hosts are resolved
+                // from what the check returns, not from the initial (possibly idle) reading.
+                val connectionProperties = RealIOSDeviceReachabilityCheck(resolver)
+                    .requireReachable(deviceId, device.connectionProperties)
+                xctestHosts = resolveRealDeviceXctestHosts(deviceId, connectionProperties)
                 val deviceCtlDevice = DeviceControlIOSDevice(deviceId = device.identifier)
                 deviceCtlDevice
             }
@@ -513,50 +515,6 @@ object MaestroSessionManager {
     private fun xctestConnectTimeout(deviceType: Device.DeviceType): Duration = when (deviceType) {
         Device.DeviceType.REAL -> 10.seconds
         else -> 1.seconds
-    }
-
-    /**
-     * A device that dropped off USB and is only paired over Wi-Fi is still reported by
-     * `devicectl list devices`, but every devicectl/xcodebuild call against it fails until
-     * CoreDevice has a tunnel to it. Fail here, with an actionable message, instead of 2-4
-     * minutes later behind a generic driver-startup timeout.
-     *
-     * Only enforced when devicectl actually reports a tunnel state. Older Xcode/devicectl
-     * releases (and pre-CoreDevice devices, i.e. iOS 16 and earlier) omit the field, and those
-     * setups drive the device through xcodebuild's lockdown path with no tunnel at all — so an
-     * absent value must not block the run.
-     */
-    private fun requireReachableRealDevice(
-        deviceId: String,
-        connectionProperties: DeviceCtlResponse.ConnectionProperties,
-    ) {
-        if (connectionProperties.isTunnelConnected) return
-
-        // No tunnel state at all means CoreDevice never had an opinion about this device — either
-        // an older devicectl, or a device it declined to pair with. Both are driven over lockdown,
-        // where there is no tunnel to wait for, so there is nothing here to warn about.
-        if (connectionProperties.tunnelState == null) {
-            logger.info(
-                "iOS device {} has no CoreDevice tunnel; it will be driven over the legacy path " +
-                    "and the XCTest runner reached through a port forward.",
-                deviceId,
-            )
-            return
-        }
-
-        val message = "iOS device $deviceId is paired but not currently reachable: devicectl reports " +
-            "tunnelState='${connectionProperties.tunnelState}' " +
-            "(transport: ${connectionProperties.transportType ?: "unknown"}). " +
-            "Connect the device over USB, or — for a network-attached device — make sure it is " +
-            "unlocked, on the same network as this host, and trusted, then confirm it shows as " +
-            "'connected' in `xcrun devicectl list devices`."
-
-        if (System.getenv(MAESTRO_SKIP_IOS_TUNNEL_CHECK)?.toBoolean() == true) {
-            logger.warn("$message (continuing anyway)")
-            return
-        }
-
-        throw CliError("$message\nSet $MAESTRO_SKIP_IOS_TUNNEL_CHECK=true to run anyway.")
     }
 
     /**

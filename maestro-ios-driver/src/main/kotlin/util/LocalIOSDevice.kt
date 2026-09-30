@@ -7,6 +7,7 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import org.slf4j.LoggerFactory
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 class DeviceCtlProcess {
 
@@ -33,6 +34,32 @@ class DeviceCtlProcess {
             }
 
         return tempOutput
+    }
+
+    /**
+     * Unlike `list devices`, `device info details` actually connects to the device, so it is
+     * bounded: against a device that is not reachable devicectl otherwise blocks for minutes.
+     * `--timeout` is devicectl's own deadline; the watchdog covers builds that ignore it.
+     */
+    fun devicectlDeviceDetailsOutput(deviceId: String, timeoutSeconds: Long): File {
+        val tempOutput = File.createTempFile("devicectl_details_response", ".json")
+        val process = ProcessBuilder(
+            listOf(
+                "xcrun", "devicectl", "--json-output", tempOutput.path, "--timeout", timeoutSeconds.toString(),
+                "device", "info", "details", "--device", deviceId
+            )
+        )
+            .redirectError(ProcessBuilder.Redirect.PIPE).start()
+
+        if (!process.waitFor(timeoutSeconds + WATCHDOG_GRACE_SECONDS, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+        }
+
+        return tempOutput
+    }
+
+    private companion object {
+        private const val WATCHDOG_GRACE_SECONDS = 5L
     }
 }
 
@@ -83,6 +110,19 @@ class LocalIOSDevice(private val deviceCtlProcess: DeviceCtlProcess = DeviceCtlP
         } finally {
             tempOutput.delete()
         }
+    }
+
+    /**
+     * Asks CoreDevice to connect to the device, which is what brings its tunnel up.
+     *
+     * Tunnels are built on demand and torn down again about ten seconds after the last client
+     * lets go of the device, so a perfectly healthy USB device that nothing has talked to for a
+     * moment reports `tunnelState='disconnected'`. `list devices` only reads that state; this
+     * is the lightest devicectl call that changes it. Only the side effect is wanted, so the
+     * output is discarded and a failure is left for the caller to observe through the state.
+     */
+    fun wakeTunnel(deviceId: String, timeoutSeconds: Long) {
+        deviceCtlProcess.devicectlDeviceDetailsOutput(deviceId, timeoutSeconds).delete()
     }
 
     fun listDeviceViaDeviceCtl(deviceId: String): DeviceCtlResponse.Device {
