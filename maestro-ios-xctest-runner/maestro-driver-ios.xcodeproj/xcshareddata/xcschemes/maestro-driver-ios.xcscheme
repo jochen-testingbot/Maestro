@@ -22,11 +22,20 @@
          </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
+   <!--
+      The runner's one test never succeeds (Maestro stops it at session end), so
+      the default deleteOnSuccess kept every screenshot XCTest took while Maestro
+      polled the screen on the device, in testmanagerd's container, where nothing
+      on the host can delete it: ~240 full-size PNGs a minute on a real iPhone.
+      keepNever lands in the built .xctestrun as System/UserAttachmentLifetime.
+   -->
    <TestAction
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES">
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      systemAttachmentLifetime = "keepNever"
+      userAttachmentLifetime = "keepNever">
       <Testables>
          <TestableReference
             skipped = "NO">
