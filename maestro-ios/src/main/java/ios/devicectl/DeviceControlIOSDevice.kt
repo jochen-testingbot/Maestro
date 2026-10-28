@@ -1,5 +1,6 @@
 package ios.devicectl
 
+import com.github.michaelbull.result.Err
 import com.github.michaelbull.result.Ok
 import com.github.michaelbull.result.Result
 import device.IOSDevice
@@ -12,7 +13,10 @@ import xcuitest.api.DeviceInfo
 import xcuitest.installer.LocalXCTestInstaller
 import java.io.InputStream
 
-class DeviceControlIOSDevice(override val deviceId: String) : IOSDevice {
+class DeviceControlIOSDevice(
+    override val deviceId: String,
+    private val resetHook: DeviceResetHook? = DeviceResetHook.fromEnvironment(),
+) : IOSDevice {
 
     private val localIOSDevice by lazy { LocalIOSDevice() }
 
@@ -57,6 +61,10 @@ class DeviceControlIOSDevice(override val deviceId: String) : IOSDevice {
     }
 
     override fun clearAppState(id: String) {
+        if (resetHook != null) {
+            resetHook.clearState(id)
+            return
+        }
         logger.warn(
             "clearState is not supported on real iOS devices due to iOS security restrictions. " +
             "App state will NOT be cleared. " +
@@ -67,7 +75,14 @@ class DeviceControlIOSDevice(override val deviceId: String) : IOSDevice {
     }
 
     override fun clearKeychain(): Result<Unit, Throwable> {
-        return Ok(Unit)
+        if (resetHook == null) {
+            return Ok(Unit)
+        }
+        return try {
+            Ok(resetHook.clearKeychain())
+        } catch (e: Exception) {
+            Err(e)
+        }
     }
 
     override fun launch(id: String, launchArguments: Map<String, Any>) {
