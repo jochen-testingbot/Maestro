@@ -8,6 +8,9 @@ struct ViewHierarchyHandler: HTTPHandler {
 
     private let springboardApplication = XCUIApplication(bundleIdentifier: "com.apple.springboard")
     private let snapshotMaxDepth = 60
+    /// Upper bound for each accessibility request made while reading the iOS 26+
+    /// SafariViewService hierarchy (see getSafariWebViewHierarchy).
+    private let safariSnapshotTimeout: TimeInterval = 10
 
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier!,
@@ -271,32 +274,78 @@ struct ViewHierarchyHandler: HTTPHandler {
         }
         
         let safariWebService = XCUIApplication(bundleIdentifier: "com.apple.SafariViewService")
-        
+
         let isRunning = safariWebService.state == .runningForeground || safariWebService.state == .runningBackground
         guard isRunning else {
             return nil
         }
-        
-        let webViewCount = safariWebService.webViews.count
-        guard webViewCount > 0 else {
-            return nil
+
+        // This snapshot runs on the main actor and XCTest cannot cancel it, so a heavy page
+        // stalls every hierarchy-based command. Cap each accessibility request instead and,
+        // when it runs out, return the app hierarchy without the Safari part.
+        //
+        // Only throwing XCTest APIs may run under the cap. A query such as
+        // `webViews.count` that hits the timeout records an XCTest failure instead of
+        // throwing, which fails testHttpServer and ends the runner (verified on an iOS 26.4
+        // simulator with kAXErrorIPCTimeout). One snapshot both detects the web view and
+        // provides the hierarchy.
+        let startedAt = Date()
+        defer {
+            NSLog("[ViewHierarchyHandler] Safari WebView hierarchy step took \(String(format: "%.2f", Date().timeIntervalSince(startedAt)))s")
         }
-        
-        NSLog("[Start] Fetching Safari WebView hierarchy (\(webViewCount) webview(s) detected)")
-        
-        do {
-            AXClientSwizzler.overwriteDefaultParameters["maxDepth"] = snapshotMaxDepth
-            let safariHierarchy = try elementHierarchy(xcuiElement: safariWebService)
-            NSLog("[Done] Safari WebView hierarchy fetched successfully")
-            if let jsonData = try? JSONEncoder().encode(safariHierarchy),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
-                logLargeString("[ViewHierarchyHandler] Safari WebView hierarchy JSON", jsonString)
+        return withAXTimeout(safariSnapshotTimeout) {
+            do {
+                AXClientSwizzler.overwriteDefaultParameters["maxDepth"] = snapshotMaxDepth
+                let snapshot = try safariWebService.snapshot()
+                guard containsWebView(snapshot) else {
+                    return nil
+                }
+                NSLog("[Start] Fetching Safari WebView hierarchy (webview detected)")
+                let safariHierarchy = AXElement(snapshot.dictionaryRepresentation)
+                NSLog("[Done] Safari WebView hierarchy fetched successfully")
+                if let jsonData = try? JSONEncoder().encode(safariHierarchy),
+                   let jsonString = String(data: jsonData, encoding: .utf8) {
+                    logLargeString("[ViewHierarchyHandler] Safari WebView hierarchy JSON", jsonString)
+                }
+                return safariHierarchy
+            } catch {
+                NSLog("[Error] Failed to fetch Safari WebView hierarchy within \(safariSnapshotTimeout)s, returning app hierarchy without it: \(error.localizedDescription)")
+                return nil
             }
-            return safariHierarchy
-        } catch {
-            NSLog("[Error] Failed to fetch Safari WebView hierarchy: \(error.localizedDescription)")
-            return nil
         }
+    }
+
+    private func containsWebView(_ snapshot: XCUIElementSnapshot) -> Bool {
+        if snapshot.elementType == .webView {
+            return true
+        }
+        return snapshot.children.contains { containsWebView($0) }
+    }
+
+    /// Runs `body` with XCTest's per-request accessibility timeout lowered to `timeout`,
+    /// restoring the previous value afterwards. If the timeout cannot be changed, `body`
+    /// still runs, just without the cap.
+    private func withAXTimeout<T>(_ timeout: TimeInterval, _ body: () -> T) -> T {
+        guard let client = AXClientProxy.sharedClient() else {
+            return body()
+        }
+        let previous = client.axTimeout()
+        do {
+            try client.setAXTimeout(timeout)
+        } catch {
+            NSLog("[ViewHierarchyHandler] Could not set AX timeout to \(timeout)s, continuing without it: \(error.localizedDescription)")
+            return body()
+        }
+        defer {
+            if previous > 0 {
+                do {
+                    try client.setAXTimeout(previous)
+                } catch {
+                    NSLog("[ViewHierarchyHandler] Could not restore AX timeout to \(previous)s: \(error.localizedDescription)")
+                }
+            }
+        }
+        return body()
     }
 
     private func findRecoveryElement(_ element: XCUIElement) throws -> XCUIElement {
