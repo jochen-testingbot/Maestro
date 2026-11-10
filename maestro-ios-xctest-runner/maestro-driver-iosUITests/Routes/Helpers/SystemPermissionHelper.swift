@@ -150,6 +150,11 @@ final class SystemPermissionHelper {
     /// Handles a system interruption element (alert or sheet) delivered by addUIInterruptionMonitor.
     /// Returns true if the dialog was handled, false otherwise.
     static func handleInterruption(_ element: XCUIElement) -> Bool {
+        // Apple Account password prompts are dismissed regardless of the configured permissions.
+        if dismissAccountAlertIfMatching(element, source: "Interruption") {
+            return true
+        }
+
         guard let permissions = effectivePermissions() else {
             NSLog("[SystemPermissionHelper] Interruption received but no permissions configured")
             return false
@@ -224,6 +229,13 @@ final class SystemPermissionHelper {
     /// and is preferred; we fall through to PermissionButtonFinder only for notifications when
     /// the XCUIElement query path didn't match.
     static func handleSystemPermissionAlertIfNeeded(appHierarchy: AXElement, foregroundApp: XCUIApplication) async {
+        // Apple Account password prompts are shown by SpringBoard on top of whatever app is in
+        // the foreground, so check SpringBoard itself rather than the foreground app.
+        let springboardAlert = springboard.alerts.firstMatch
+        if springboardAlert.exists, dismissAccountAlertIfMatching(springboardAlert, source: "Fallback") {
+            return
+        }
+
         guard foregroundApp.bundleID == "com.apple.springboard" else {
             return
         }
@@ -321,6 +333,34 @@ final class SystemPermissionHelper {
                 NSLog("[SystemPermissionHelper] [AX-Fallback] Unknown permission button result: \(result)")
             }
         }
+    }
+
+    // MARK: - Apple Account password prompts
+
+    private static let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+
+    /// Dismisses an "Apple Account Verification" / "Sign In to iTunes Store"-style alert by tapping
+    /// "Not Now" (or "Cancel"). These appear when an Apple Account is signed in on the device and
+    /// block the app under test; they are never permission prompts. Never taps "Settings" or
+    /// "Sign In". Returns true only when a dismiss button was tapped.
+    static func dismissAccountAlertIfMatching(_ element: XCUIElement, source: String) -> Bool {
+        let texts = [element.label] + element.staticTexts.allElementsBoundByIndex.prefix(10).map { $0.label }
+        guard AccountAlertMatcher.isAccountAlert(texts: texts) else {
+            return false
+        }
+
+        let buttons = element.buttons.allElementsBoundByIndex
+        let buttonLabels = buttons.map { $0.label }
+        NSLog("[SystemPermissionHelper] [\(source)] Apple Account alert detected: \(texts) buttons: \(buttonLabels)")
+
+        guard let index = AccountAlertMatcher.dismissButtonIndex(buttonLabels: buttonLabels) else {
+            NSLog("[SystemPermissionHelper] [\(source)] Apple Account alert has no dismiss button, leaving it")
+            return false
+        }
+
+        buttons[index].tap()
+        NSLog("[SystemPermissionHelper] [\(source)] Dismissed Apple Account alert with '\(buttonLabels[index])'")
+        return true
     }
 
     /// Tap a button by index within a dialog element (alert or sheet).
