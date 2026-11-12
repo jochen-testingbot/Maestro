@@ -97,6 +97,23 @@ public struct AXElement: Codable, Equatable {
         return max ?? 1
     }
 
+    /// Every element in this subtree (including `self`) whose `elementType` matches,
+    /// in depth-first pre-order. Nested matches are included, like
+    /// `XCUIElementQuery.allElementsBoundByIndex` on a descendants query.
+    public func descendants(ofType elementType: Int) -> [AXElement] {
+        var matches = [AXElement]()
+
+        func collect(_ element: AXElement) {
+            if element.elementType == elementType {
+                matches.append(element)
+            }
+            element.children?.forEach(collect)
+        }
+
+        collect(self)
+        return matches
+    }
+
     public func filterAllChildrenNotInKeyboardBounds(_ keyboardFrame: CGRect) -> [AXElement] {
         var filteredChildren = [AXElement]()
 

@@ -163,4 +163,30 @@ final class AXElementTests: XCTestCase {
 
         XCTAssertNotEqual(element1, element2)
     }
+
+    // MARK: - descendants(ofType:)
+
+    func testDescendantsOfType_returnsMatchesInPreOrderIncludingNested() {
+        let statusBar = 25
+        let nested = AXElement(identifier: "nested", elementType: statusBar)
+        let outer = AXElement(identifier: "outer", elementType: statusBar, children: [nested])
+        let other = AXElement(identifier: "second", elementType: statusBar)
+        let root = AXElement(
+            identifier: "springboard",
+            elementType: 2,
+            children: [
+                AXElement(identifier: "window", elementType: 4, children: [outer]),
+                AXElement(identifier: "button", elementType: 9),
+                other
+            ]
+        )
+
+        XCTAssertEqual(root.descendants(ofType: statusBar).map(\.identifier), ["outer", "nested", "second"])
+    }
+
+    func testDescendantsOfType_includesSelfAndReturnsEmptyWhenNoMatch() {
+        let leaf = AXElement(identifier: "bar", elementType: 25)
+        XCTAssertEqual(leaf.descendants(ofType: 25).map(\.identifier), ["bar"])
+        XCTAssertTrue(AXElement(children: [leaf]).descendants(ofType: 9).isEmpty)
+    }
 }
