@@ -31,21 +31,28 @@ public enum AccountAlertMatcher {
     /// True when the given alert texts (title, message, static texts) identify an
     /// Apple Account password prompt.
     public static func isAccountAlert(texts: [String]) -> Bool {
-        let haystack = texts.joined(separator: " ").lowercased()
+        let haystack = normalize(texts.joined(separator: " "))
         return titlePatterns.contains { haystack.contains($0) }
     }
 
     /// Index of the button to tap to dismiss the alert, or nil when none of the
     /// buttons is a known dismiss button (in which case nothing must be tapped).
     public static func dismissButtonIndex(buttonLabels: [String]) -> Int? {
-        let normalized = buttonLabels.map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        }
+        let normalized = buttonLabels.map(normalize)
         for wanted in dismissLabels {
             if let index = normalized.firstIndex(of: wanted) {
                 return index
             }
         }
         return nil
+    }
+
+    /// Lowercases, folds every Unicode whitespace run into one plain space and trims.
+    /// iOS 26+ writes the brand name with a no-break space ("Apple\u{00A0}Account
+    /// Verification"), which a plain-space pattern never matches.
+    static func normalize(_ text: String) -> String {
+        text.lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
     }
 }
