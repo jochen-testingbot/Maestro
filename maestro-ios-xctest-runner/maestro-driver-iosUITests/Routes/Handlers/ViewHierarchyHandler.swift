@@ -49,10 +49,21 @@ struct ViewHierarchyHandler: HTTPHandler {
 
     func getAppViewHierarchy(foregroundApp: XCUIApplication, excludeKeyboardElements: Bool) async throws -> AXElement {
         let appHierarchy = try getHierarchyWithFallback(foregroundApp)
-        await SystemPermissionHelper.handleSystemPermissionAlertIfNeeded(appHierarchy: appHierarchy, foregroundApp: foregroundApp)
-                
+
+        // One throwing SpringBoard snapshot, shared by the system dialog check and the status
+        // bars. When SpringBoard is in front, the app hierarchy already is that snapshot.
+        let springboardHierarchy: AXElement? = foregroundApp.bundleID == "com.apple.springboard"
+            ? appHierarchy
+            : logger.measure(message: "Fetch SpringBoard snapshot") { springboardSnapshot() }
+
+        await SystemPermissionHelper.handleSystemPermissionAlertIfNeeded(
+            springboardHierarchy: springboardHierarchy,
+            appHierarchy: appHierarchy,
+            foregroundApp: foregroundApp
+        )
+
         let statusBars = logger.measure(message: "Fetch status bar hierarchy") {
-            fullStatusBars(springboardApplication)
+            fullStatusBars(in: springboardHierarchy)
         } ?? []
         
         // Fetch Safari WebView hierarchy for iOS 26+ (runs in separate SafariViewService process)
@@ -242,23 +253,27 @@ struct ViewHierarchyHandler: HTTPHandler {
         return try? elementHierarchy(xcuiElement: alert)
     }
     
-    /// Status bars are read from one throwing snapshot of `element` (SpringBoard).
+    /// One throwing snapshot of SpringBoard, or nil when it fails.
     ///
-    /// Do not use `statusBars.firstMatch.exists` / `statusBars.allElementsBoundByIndex` here.
-    /// On iOS 26 one of SpringBoard's status bars is hosted by the keyboard process
-    /// (com.apple.InputUI). When the keyboard goes away mid-query, resolving that element
-    /// fails with kAXErrorInvalidUIElement, and those non-throwing APIs record an XCTest
-    /// failure ("Failed to resolve query") instead of throwing. That fails testHttpServer
-    /// and the runner exits. `snapshot()` throws instead, so a race just drops the status bars.
-    func fullStatusBars(_ element: XCUIApplication) -> [AXElement]? {
+    /// Do not replace this with `statusBars.firstMatch.exists`, `alerts.firstMatch.exists`,
+    /// `allElementsBoundByIndex`, `.label` etc. Those non-throwing APIs resolve elements again,
+    /// and when one cannot be resolved (a status bar hosted by com.apple.InputUI while the
+    /// keyboard goes away, or the remote map view in the location prompt) they record an
+    /// XCTest failure instead of throwing. That fails testHttpServer and the runner exits.
+    func springboardSnapshot() -> AXElement? {
         do {
-            let root = try elementHierarchy(xcuiElement: element)
-            let statusBars = root.descendants(ofType: Int(XCUIElement.ElementType.statusBar.rawValue))
-            return statusBars.isEmpty ? nil : statusBars
+            return try elementHierarchy(xcuiElement: springboardApplication)
         } catch {
-            NSLog("[ViewHierarchyHandler] Status bar snapshot failed, continuing without status bars: \(error.localizedDescription)")
+            NSLog("[ViewHierarchyHandler] SpringBoard snapshot failed, continuing without it: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// Status bars collected from the SpringBoard snapshot (see `springboardSnapshot()`).
+    func fullStatusBars(in springboardHierarchy: AXElement?) -> [AXElement]? {
+        guard let root = springboardHierarchy else { return nil }
+        let statusBars = root.descendants(ofType: Int(XCUIElement.ElementType.statusBar.rawValue))
+        return statusBars.isEmpty ? nil : statusBars
     }
     
     /// Fetches the Safari WebView hierarchy for iOS 26+ where SFSafariViewController
