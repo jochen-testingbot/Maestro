@@ -1,130 +1,21 @@
 import XCTest
 import MaestroDriverLib
 
+/// Answers iOS system permission dialogs and dismisses Apple Account password alerts.
+///
+/// Everything is read from one throwing `snapshot()` (an `AXElement` tree) and matched by
+/// `SystemDialogMatcher` in MaestroDriverLib. Do not go back to non-throwing XCUIElement
+/// APIs (`.exists`, `.label`, `allElementsBoundByIndex`, `element(boundBy:)`) here: they
+/// resolve each element again, and when one cannot be resolved they record an XCTest failure
+/// instead of throwing. That fails `testHttpServer` and the runner exits. The iOS 26
+/// location prompt reliably triggers this: its map / "Precise: On" part is a remote view
+/// hosted by CoreLocationVanillaWhenInUseAuthPromptPlugin, and per-element queries into it
+/// killed the runner on a physical iPhone.
 @MainActor
 final class SystemPermissionHelper {
 
-    // MARK: - Permission dialog definitions
-
-    /// Defines how to detect and handle a specific iOS system permission dialog.
-    struct PermissionDialog {
-        let key: String            // Matches the key in the permissions map (e.g. "location")
-        let labelPattern: String   // Case-insensitive substring to match in the alert/sheet label
-        /// Maps a PermissionValue to the button index to tap. If the value is not in the map, no action is taken.
-        let buttonMap: [PermissionValue: Int]
-    }
-
-    /// All known iOS system permission dialogs.
-    /// Button indices are 0-based and correspond to the order buttons appear in the dialog.
-    static let permissionDialogs: [PermissionDialog] = [
-        // Notifications: [Don't Allow (0), Allow (1)]
-        PermissionDialog(
-            key: "notifications",
-            labelPattern: "Would Like to Send You Notifications",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Location: [Allow Once (0), Allow While Using App (1), Don't Allow (2)]
-        PermissionDialog(
-            key: "location",
-            labelPattern: "to use your location",
-            buttonMap: [.allow: 1, .always: 1, .inuse: 1, .deny: 2, .never: 2]
-        ),
-        // Bluetooth: [Don't Allow (0), Allow (1)]
-        // Dialog text varies: "Would Like to Use Bluetooth" or "to find Bluetooth devices"
-        PermissionDialog(
-            key: "bluetooth",
-            labelPattern: "Bluetooth",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Camera: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "camera",
-            labelPattern: "Would Like to Access the Camera",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Microphone: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "microphone",
-            labelPattern: "Would Like to Access the Microphone",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Photos: [Don't Allow (0), Allow Limited Access (1), Allow Full Access (2)]
-        PermissionDialog(
-            key: "photos",
-            labelPattern: "Would Like to Access Your Photos",
-            buttonMap: [.allow: 2, .limited: 1, .deny: 0]
-        ),
-        // Contacts: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "contacts",
-            labelPattern: "Would Like to Access Your Contacts",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Calendar: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "calendar",
-            labelPattern: "Would Like to Access Your Calendar",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Reminders: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "reminders",
-            labelPattern: "Would Like to Access Your Reminders",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Speech Recognition: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "speech",
-            labelPattern: "Would Like to Access Speech Recognition",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Motion & Fitness: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "motion",
-            labelPattern: "Would Like to Access Your Motion",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // HomeKit: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "homekit",
-            labelPattern: "Would Like to Access Your Home Data",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Media Library: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "medialibrary",
-            labelPattern: "Would Like to Access Apple Music",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Siri: [Don't Allow (0), OK (1)]
-        PermissionDialog(
-            key: "siri",
-            labelPattern: "Would Like to Access Siri",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // User Tracking (App Tracking Transparency): [Ask App Not to Track (0), Allow (1)]
-        PermissionDialog(
-            key: "usertracking",
-            labelPattern: "Would Like Permission to Track",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-        // Local Network: [Don't Allow (0), Allow (1)]
-        // Dialog: "Allow X to find devices on local networks?"
-        PermissionDialog(
-            key: "localnetwork",
-            labelPattern: "local network",
-            buttonMap: [.allow: 1, .deny: 0]
-        ),
-    ]
-
-    // MARK: - Helpers
-
-    /// Permissions that are auto-allowed by default unless explicitly configured otherwise.
-    /// These dialogs block the entire UI and are rarely intentionally denied in test flows.
-    private static let autoAllowPermissions = ["bluetooth", "localnetwork"]
-
-    /// AXElement-based button finder from upstream MaestroDriverLib. Used as an additional
-    /// fallback when XCUIElement queries don't find a matching dialog.
+    /// AXElement-based notifications button finder from upstream MaestroDriverLib, kept as a
+    /// last resort for a notifications prompt that is not exposed as an alert or sheet.
     private static let buttonFinder = PermissionButtonFinder()
 
     /// Returns the stored permissions with auto-allow defaults applied.
@@ -133,16 +24,58 @@ final class SystemPermissionHelper {
               var permissions = try? JSONDecoder().decode([String: PermissionValue].self, from: data) else {
             // Even with no permissions configured, still handle auto-allow permissions
             var defaults: [String: PermissionValue] = [:]
-            for key in autoAllowPermissions { defaults[key] = .allow }
+            for key in SystemDialogMatcher.autoAllowPermissions { defaults[key] = .allow }
             return defaults
         }
-        // Apply auto-allow defaults for permissions not explicitly set
-        for key in autoAllowPermissions {
-            if permissions[key] == nil {
-                permissions[key] = .allow
-            }
+        for key in SystemDialogMatcher.autoAllowPermissions where permissions[key] == nil {
+            permissions[key] = .allow
         }
         return permissions.isEmpty ? nil : permissions
+    }
+
+    private static func describe(_ tap: SystemDialogTap) -> String {
+        switch tap.reason {
+        case .accountAlert:
+            return "Apple Account alert"
+        case .permission(let key, let value):
+            return "'\(key)' permission dialog (\(value.rawValue))"
+        case .customPermission(let key, let value):
+            return "'\(key)' custom permission dialog (\(value.rawValue))"
+        @unknown default:
+            return "system dialog"
+        }
+    }
+
+    /// Last dialog summary logged by the view-hierarchy hook, so a dialog that stays on screen
+    /// is logged once rather than on every request.
+    private static var lastLoggedDialogs = ""
+
+    private static func logDialogs(in root: AXElement, source: String, onlyOnChange: Bool) {
+        let summary = SystemDialogMatcher.dialogs(in: root).map { dialog -> String in
+            let kind = dialog.elementType == ElementType.alert ? "alert" : "sheet"
+            let title = SystemDialogMatcher.texts(of: dialog).first ?? ""
+            let buttons = SystemDialogMatcher.buttons(of: dialog).map(\.label)
+            return "\(kind) '\(title)' buttons: \(buttons)"
+        }.joined(separator: "; ")
+        if onlyOnChange {
+            guard summary != lastLoggedDialogs else { return }
+            lastLoggedDialogs = summary
+        }
+        if !summary.isEmpty {
+            NSLog("[SystemPermissionHelper] [\(source)] Found \(summary)")
+        }
+    }
+
+    /// The tap to perform for `root`, if any: an Apple Account alert first (regardless of
+    /// permissions), then a permission dialog when `permissionsApply` is true.
+    private static func decide(in root: AXElement, permissionsApply: Bool) -> SystemDialogTap? {
+        if let tap = SystemDialogMatcher.accountAlertDismissal(in: root) {
+            return tap
+        }
+        guard permissionsApply, let permissions = effectivePermissions() else {
+            return nil
+        }
+        return SystemDialogMatcher.permissionTap(in: root, permissions: permissions)
     }
 
     // MARK: - Interruption monitor handler
@@ -150,262 +83,91 @@ final class SystemPermissionHelper {
     /// Handles a system interruption element (alert or sheet) delivered by addUIInterruptionMonitor.
     /// Returns true if the dialog was handled, false otherwise.
     static func handleInterruption(_ element: XCUIElement) -> Bool {
-        // Apple Account password prompts are dismissed regardless of the configured permissions.
-        if dismissAccountAlertIfMatching(element, source: "Interruption") {
-            return true
+        let root: AXElement
+        do {
+            root = AXElement(try element.snapshot().dictionaryRepresentation)
+        } catch {
+            NSLog("[SystemPermissionHelper] [Interruption] snapshot failed: \(error.localizedDescription)")
+            return false
         }
+        logDialogs(in: root, source: "Interruption", onlyOnChange: false)
 
-        guard let permissions = effectivePermissions() else {
-            NSLog("[SystemPermissionHelper] Interruption received but no permissions configured")
+        guard let tap = decide(in: root, permissionsApply: true) else {
+            NSLog("[SystemPermissionHelper] [Interruption] No matching dialog, leaving it")
             return false
         }
 
-        // Collect all text from the interrupting element for matching
-        let elementLabel = element.label
-        NSLog("[SystemPermissionHelper] Interruption received — label: '\(elementLabel)'")
-
-        // Log all static texts for debugging
-        let texts = element.staticTexts.allElementsBoundByIndex
-        let textLabels = texts.prefix(10).map { $0.label }
-        NSLog("[SystemPermissionHelper] Interruption static texts: \(textLabels)")
-
-        // Log all buttons for debugging
-        let buttons = element.buttons.allElementsBoundByIndex
-        let buttonLabels = buttons.enumerated().map { "[\($0.offset)]: '\($0.element.label)'" }
-        NSLog("[SystemPermissionHelper] Interruption buttons: \(buttonLabels)")
-
-        // Build a combined string from all static texts for more reliable matching
-        let allText = textLabels.joined(separator: " ")
-
-        for dialog in permissionDialogs {
-            guard let permissionValue = permissions[dialog.key] else {
-                continue
-            }
-            if permissionValue == .unset || permissionValue == .unknown {
-                continue
-            }
-
-            // Check if the dialog label or any static text contains the pattern
-            let pattern = dialog.labelPattern.lowercased()
-            let matches = elementLabel.lowercased().contains(pattern) || allText.lowercased().contains(pattern)
-
-            if matches {
-                NSLog("[SystemPermissionHelper] Matched '\(dialog.key)' permission dialog (pattern: '\(dialog.labelPattern)')")
-
-                guard let buttonIndex = dialog.buttonMap[permissionValue] else {
-                    NSLog("[SystemPermissionHelper] No button mapping for '\(dialog.key)' with value '\(permissionValue.rawValue)', skipping")
-                    continue
-                }
-
-                let button = element.buttons.element(boundBy: buttonIndex)
-                if button.exists {
-                    let buttonLabel = button.label
-                    NSLog("[SystemPermissionHelper] Tapping button at index \(buttonIndex) ('\(buttonLabel)') for '\(dialog.key)' permission with value '\(permissionValue.rawValue)'")
-                    button.tap()
-                    NSLog("[SystemPermissionHelper] Successfully tapped '\(buttonLabel)' on '\(dialog.key)' permission dialog")
-                    return true
-                } else {
-                    NSLog("[SystemPermissionHelper] Button at index \(buttonIndex) not found for '\(dialog.key)'. Available buttons (\(buttons.count)): \(buttonLabels.joined(separator: ", "))")
-                }
-            }
-        }
-
-        NSLog("[SystemPermissionHelper] No matching permission dialog found in interruption")
-        return false
-    }
-
-    // MARK: - ViewHierarchy hook (called from ViewHierarchyHandler as additional safety net)
-
-    /// Called from ViewHierarchyHandler when Springboard is the foreground app.
-    /// Acts as a fallback in case the interruption monitor did not fire.
-    ///
-    /// Queries the alert/sheet ONCE and matches its label against all patterns — avoids
-    /// running N predicate queries per element type, which causes XCUITest errors to accumulate
-    /// and crash the test with "Interrupted by waiter."
-    ///
-    /// The `appHierarchy` parameter (added in upstream v2.6.0 to enable AXElement-based
-    /// button finding via MaestroDriverLib's `PermissionButtonFinder`) is accepted to keep the
-    /// caller signature stable. The XCUIElement-based path below covers all 16 known dialogs
-    /// and is preferred; we fall through to PermissionButtonFinder only for notifications when
-    /// the XCUIElement query path didn't match.
-    static func handleSystemPermissionAlertIfNeeded(appHierarchy: AXElement, foregroundApp: XCUIApplication) async {
-        // Apple Account password prompts are shown by SpringBoard on top of whatever app is in
-        // the foreground, so check SpringBoard itself rather than the foreground app.
-        let springboardAlert = springboard.alerts.firstMatch
-        if springboardAlert.exists, dismissAccountAlertIfMatching(springboardAlert, source: "Fallback") {
-            return
-        }
-
-        guard foregroundApp.bundleID == "com.apple.springboard" else {
-            return
-        }
-
-        guard let permissions = effectivePermissions() else {
-            return
-        }
-
-        // Check the first alert once, then match its label against all dialog patterns
-        let alert = foregroundApp.alerts.element
-        if alert.exists {
-            let alertLabel = alert.label.lowercased()
-            NSLog("[SystemPermissionHelper] [Fallback] Found alert with label: '\(alert.label)'")
-
-            for dialog in permissionDialogs {
-                guard let permissionValue = permissions[dialog.key],
-                      permissionValue != .unset && permissionValue != .unknown else {
-                    continue
-                }
-                if alertLabel.contains(dialog.labelPattern.lowercased()) {
-                    NSLog("[SystemPermissionHelper] [Fallback] Matched '\(dialog.key)' in alert")
-                    tapButton(in: alert, dialog: dialog, permissionValue: permissionValue)
-                    return
-                }
-            }
-            NSLog("[SystemPermissionHelper] [Fallback] Alert did not match any known permission dialog")
-        }
-
-        // Check the first sheet once
-        let sheet = foregroundApp.sheets.element
-        if sheet.exists {
-            let sheetLabel = sheet.label.lowercased()
-            NSLog("[SystemPermissionHelper] [Fallback] Found sheet with label: '\(sheet.label)'")
-
-            for dialog in permissionDialogs {
-                guard let permissionValue = permissions[dialog.key],
-                      permissionValue != .unset && permissionValue != .unknown else {
-                    continue
-                }
-                if sheetLabel.contains(dialog.labelPattern.lowercased()) {
-                    NSLog("[SystemPermissionHelper] [Fallback] Matched '\(dialog.key)' in sheet")
-                    tapButton(in: sheet, dialog: dialog, permissionValue: permissionValue)
-                    return
-                }
-            }
-            NSLog("[SystemPermissionHelper] [Fallback] Sheet did not match any known permission dialog")
-        }
-
-        // For custom system dialogs (e.g. Bluetooth "find devices", Local Network)
-        // that are neither alerts nor sheets: check static texts with targeted predicates.
-        // Only check auto-allow permissions here to minimize queries.
-        for key in autoAllowPermissions {
-            guard let dialog = permissionDialogs.first(where: { $0.key == key }),
-                  let permissionValue = permissions[key],
-                  permissionValue != .unset && permissionValue != .unknown else {
-                continue
-            }
-            let predicate = NSPredicate(format: "label CONTAINS[c] %@", dialog.labelPattern)
-            let matchingText = foregroundApp.staticTexts.matching(predicate).element
-            if matchingText.exists {
-                NSLog("[SystemPermissionHelper] [Fallback] Detected '\(dialog.key)' via Springboard static text (custom dialog)")
-                let targetLabel: String
-                switch permissionValue {
-                case .deny, .never:
-                    targetLabel = "Don\u{2019}t Allow"
-                default:
-                    targetLabel = "Allow"
-                }
-                let button = foregroundApp.buttons[targetLabel]
-                if button.exists {
-                    NSLog("[SystemPermissionHelper] [Fallback] Tapping '\(targetLabel)' for '\(dialog.key)'")
-                    button.tap()
-                    NSLog("[SystemPermissionHelper] [Fallback] Successfully tapped '\(targetLabel)' on '\(dialog.key)'")
-                } else {
-                    NSLog("[SystemPermissionHelper] [Fallback] Button '\(targetLabel)' not found on Springboard for '\(dialog.key)'")
-                }
-                return
-            }
-        }
-
-        // Last-resort: upstream's AXElement-based button finder for the notifications dialog.
-        // Only fires for notifications because that's all PermissionButtonFinder currently knows
-        // about. The XCUIElement path above will normally cover this; this is purely defensive.
-        if let notificationsPermission = permissions["notifications"] {
-            let result = buttonFinder.findButtonToTap(for: notificationsPermission, in: appHierarchy)
-            switch result {
-            case .found(let frame):
-                NSLog("[SystemPermissionHelper] [AX-Fallback] Found notifications button at frame: \(frame)")
-                await tapAtCenter(of: frame, in: foregroundApp)
-            case .noButtonsFound:
-                NSLog("[SystemPermissionHelper] [AX-Fallback] No buttons found in hierarchy")
-            case .noActionRequired:
-                break
-            @unknown default:
-                NSLog("[SystemPermissionHelper] [AX-Fallback] Unknown permission button result: \(result)")
-            }
-        }
-    }
-
-    // MARK: - Apple Account password prompts
-
-    private static let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-
-    /// Dismisses an "Apple Account Verification" / "Sign In to iTunes Store"-style alert by tapping
-    /// "Not Now" (or "Cancel"). These appear when an Apple Account is signed in on the device and
-    /// block the app under test; they are never permission prompts. Never taps "Settings" or
-    /// "Sign In". Returns true only when a dismiss button was tapped.
-    static func dismissAccountAlertIfMatching(_ element: XCUIElement, source: String) -> Bool {
-        let texts = [element.label] + element.staticTexts.allElementsBoundByIndex.prefix(10).map { $0.label }
-        guard AccountAlertMatcher.isAccountAlert(texts: texts) else {
-            return false
-        }
-
-        let buttons = element.buttons.allElementsBoundByIndex
-        let buttonLabels = buttons.map { $0.label }
-        NSLog("[SystemPermissionHelper] [\(source)] Apple Account alert detected: \(texts) buttons: \(buttonLabels)")
-
-        guard let index = AccountAlertMatcher.dismissButtonIndex(buttonLabels: buttonLabels) else {
-            NSLog("[SystemPermissionHelper] [\(source)] Apple Account alert has no dismiss button, leaving it")
-            return false
-        }
-
-        buttons[index].tap()
-        NSLog("[SystemPermissionHelper] [\(source)] Dismissed Apple Account alert with '\(buttonLabels[index])'")
+        // The interruption handler is synchronous, so tap through XCUIElement. Resolve the
+        // button by its (unique) label rather than by index, and only after the throwing
+        // snapshot above has confirmed it is there.
+        NSLog("[SystemPermissionHelper] [Interruption] Tapping '\(tap.buttonLabel)' on \(describe(tap))")
+        element.buttons[tap.buttonLabel].firstMatch.tap()
         return true
     }
 
-    /// Tap a button by index within a dialog element (alert or sheet).
-    private static func tapButton(in dialogElement: XCUIElement, dialog: PermissionDialog, permissionValue: PermissionValue) {
-        guard let buttonIndex = dialog.buttonMap[permissionValue] else {
-            NSLog("[SystemPermissionHelper] [Fallback] No button mapping for '\(dialog.key)' with value '\(permissionValue.rawValue)', skipping")
+    // MARK: - ViewHierarchy hook
+
+    /// Called from ViewHierarchyHandler on every view-hierarchy request, as a safety net in case
+    /// the interruption monitor did not fire.
+    ///
+    /// - Parameters:
+    ///   - springboardHierarchy: one throwing snapshot of SpringBoard taken by the caller, or nil
+    ///     when that snapshot failed (then nothing is done).
+    ///   - appHierarchy: the foreground app's hierarchy, used by the notifications last resort.
+    ///   - foregroundApp: permission dialogs are only answered while SpringBoard is in front.
+    ///     Apple Account alerts are dismissed whatever app is in front.
+    static func handleSystemPermissionAlertIfNeeded(
+        springboardHierarchy: AXElement?,
+        appHierarchy: AXElement,
+        foregroundApp: XCUIApplication
+    ) async {
+        guard let springboardHierarchy = springboardHierarchy else {
+            NSLog("[SystemPermissionHelper] [Fallback] No SpringBoard snapshot, skipping system dialog check")
             return
         }
 
-        let button = dialogElement.buttons.element(boundBy: buttonIndex)
-        if button.exists {
-            let buttonLabel = button.label
-            NSLog("[SystemPermissionHelper] [Fallback] Tapping '\(buttonLabel)' for '\(dialog.key)'")
-            button.tap()
-            NSLog("[SystemPermissionHelper] [Fallback] Successfully tapped '\(buttonLabel)' on '\(dialog.key)'")
-        } else {
-            NSLog("[SystemPermissionHelper] [Fallback] Button at index \(buttonIndex) not found for '\(dialog.key)'")
+        let springboardInFront = foregroundApp.bundleID == "com.apple.springboard"
+        if springboardInFront {
+            logDialogs(in: springboardHierarchy, source: "Fallback", onlyOnChange: true)
+        }
+
+        if let tap = decide(in: springboardHierarchy, permissionsApply: springboardInFront) {
+            NSLog("[SystemPermissionHelper] [Fallback] Tapping '\(tap.buttonLabel)' on \(describe(tap)) at \(tap.frame)")
+            await tapAtCenter(of: tap.frame)
+            return
+        }
+
+        guard springboardInFront, let notifications = effectivePermissions()?["notifications"] else {
+            return
+        }
+        switch buttonFinder.findButtonToTap(for: notifications, in: appHierarchy) {
+        case .found(let frame):
+            NSLog("[SystemPermissionHelper] [AX-Fallback] Found notifications button at frame: \(frame)")
+            await tapAtCenter(of: frame)
+        case .noButtonsFound, .noActionRequired:
+            break
+        @unknown default:
+            break
         }
     }
 
-    /// Tap at the center of an element's frame using the RunnerDaemonProxy.
-    /// Imported from upstream v2.6.0 — used by the AXElement fallback path.
-    private static func tapAtCenter(of frame: AXFrame, in app: XCUIApplication) async {
-        let x = frame.centerX
-        let y = frame.centerY
-
-        NSLog("Tapping at coordinates: (\(x), \(y))")
-
+    /// Tap at the center of a frame with RunnerDaemonProxy. Needs no XCUIElement resolution,
+    /// so it cannot record an XCTest failure.
+    private static func tapAtCenter(of frame: AXFrame) async {
         let (width, height) = ScreenSizeHelper.physicalScreenSize()
         let point = ScreenSizeHelper.orientationAwarePoint(
             width: width,
             height: height,
-            point: CGPoint(x: CGFloat(x), y: CGFloat(y))
+            point: CGPoint(x: CGFloat(frame.centerX), y: CGFloat(frame.centerY))
         )
 
         let eventRecord = EventRecord(orientation: .portrait)
-        _ = eventRecord.addPointerTouchEvent(
-            at: point,
-            touchUpAfter: nil
-        )
+        _ = eventRecord.addPointerTouchEvent(at: point, touchUpAfter: nil)
 
         do {
             try await RunnerDaemonProxy().synthesize(eventRecord: eventRecord)
         } catch {
-            NSLog("Error tapping permission button: \(error)")
+            NSLog("[SystemPermissionHelper] Error tapping system dialog button: \(error)")
         }
     }
 }
