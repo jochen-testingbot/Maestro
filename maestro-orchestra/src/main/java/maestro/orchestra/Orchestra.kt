@@ -1346,9 +1346,25 @@ class Orchestra(
         val permissions = command.permissions ?: mapOf("all" to "allow")
         maestro.setPermissions(command.appId, permissions)
 
+        val launchArguments = (command.launchArguments ?: emptyMap()).toMutableMap()
+
+        // Auto-inject Apple locale launch arguments from environment variables
+        val appleLocale = System.getenv("APPLE_LOCALE")
+        val appleLanguages = System.getenv("APPLE_LANGUAGES")
+        if (!appleLocale.isNullOrEmpty()
+            && !launchArguments.containsKey("-AppleLocale")
+            && !launchArguments.containsKey("AppleLocale")) {
+            launchArguments["-AppleLocale"] = appleLocale
+        }
+        if (!appleLanguages.isNullOrEmpty()
+            && !launchArguments.containsKey("-AppleLanguages")
+            && !launchArguments.containsKey("AppleLanguages")) {
+            launchArguments["-AppleLanguages"] = appleLanguages
+        }
+
         maestro.launchApp(
             appId = command.appId,
-            launchArguments = command.launchArguments ?: emptyMap(),
+            launchArguments = launchArguments,
             stopIfRunning = command.stopApp ?: true
         )
 

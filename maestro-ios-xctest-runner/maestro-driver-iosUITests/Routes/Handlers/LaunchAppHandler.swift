@@ -15,8 +15,18 @@ struct LaunchAppHandler: HTTPHandler {
             return AppError(type: .precondition, message: "incorrect request body provided").httpResponse
         }
         
-        NSLog("[Start] Launching app with bundle ID: \(requestBody.bundleId)")
-        XCUIApplication(bundleIdentifier: requestBody.bundleId).activate()
+        let app = XCUIApplication(bundleIdentifier: requestBody.bundleId)
+        let args = requestBody.flattenedLaunchArguments
+
+        if !args.isEmpty {
+            NSLog("[Start] Launching app with bundle ID: \(requestBody.bundleId) with arguments: \(args)")
+            app.terminate()
+            app.launchArguments = args
+            app.launch()
+        } else {
+            NSLog("[Start] Launching app with bundle ID: \(requestBody.bundleId)")
+            app.activate()
+        }
         NSLog("[Done] Launching app with bundle ID: \(requestBody.bundleId)")
 
         

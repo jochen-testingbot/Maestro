@@ -99,8 +99,9 @@ class XCTestDriverClient(
         executeJsonRequest("terminateApp", TerminateAppRequest(appId))
     }
 
-    fun launchApp(appId: String) {
-        executeJsonRequest("launchApp", LaunchAppRequest(appId))
+    fun launchApp(appId: String, launchArguments: Map<String, Any> = emptyMap()) {
+        val args = if (launchArguments.isEmpty()) null else launchArguments
+        executeJsonRequest("launchApp", LaunchAppRequest(appId, args))
     }
 
     fun keyboardInfo(installedApps: Set<String>): KeyboardInfoResponse {
@@ -266,17 +267,24 @@ class XCTestDriverClient(
     private fun executeJsonRequest(pathSegment: String, body: Any, oneShot: Boolean = false): String =
         transportCall(pathSegment) {
             val mediaType = "application/json; charset=utf-8".toMediaType()
-            val bodyData = mapper.writeValueAsString(body).toRequestBody(mediaType)
+            val jsonBody = mapper.writeValueAsString(body)
+            val bodyData = jsonBody.toRequestBody(mediaType)
                 .let { if (oneShot) it.asOneShot() else it }
+            val url = client.xctestAPIBuilder(pathSegment).build()
+
+            logger.info("XCTest request: POST $url body: $jsonBody")
 
             val requestBuilder = Request.Builder()
                 .addHeader("Content-Type", "application/json")
-                .url(client.xctestAPIBuilder(pathSegment).build())
+                .url(url)
                 .post(bodyData)
 
             okHttpClient
                 .newCall(requestBuilder.build())
-                .execute().use { processResponse(it, pathSegment) }
+                .execute().use {
+                    logger.info("XCTest response: ${it.code} for $pathSegment")
+                    processResponse(it, pathSegment)
+                }
         }
 
     private fun executeJsonRequest(pathSegment: String): String =

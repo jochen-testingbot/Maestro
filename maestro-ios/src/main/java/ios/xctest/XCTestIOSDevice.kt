@@ -143,7 +143,7 @@ class XCTestIOSDevice(
         launchArguments: Map<String, Any>,
     ) {
         execute {
-            client.launchApp(id)
+            client.launchApp(id, launchArguments)
         }
     }
 
@@ -236,8 +236,24 @@ class XCTestIOSDevice(
     }
 
     private fun <T> execute(call: () -> T): T {
+        return executeWithRetry(call, maxRetries = APP_NOT_RUNNING_MAX_RETRIES)
+    }
+
+    private fun <T> executeWithRetry(call: () -> T, maxRetries: Int, attempt: Int = 1): T {
         return try {
             call()
+        } catch (appNotRunning: XCUITestServerError.AppNotRunning) {
+            // A slowly starting app (common on physical devices) answers "not running" for a
+            // moment after launch. Retry briefly; if it is still not running, rethrow the original
+            // error so IOSDriver reports AppNotRunning and upstream crash detection takes over.
+            if (attempt < maxRetries) {
+                logger.info("App not running yet, retrying in ${APP_NOT_RUNNING_RETRY_DELAY_MS}ms (attempt $attempt/$maxRetries)")
+                Thread.sleep(APP_NOT_RUNNING_RETRY_DELAY_MS)
+                executeWithRetry(call, maxRetries, attempt + 1)
+            } else {
+                logger.error("App still not running after $maxRetries attempts")
+                throw appNotRunning
+            }
         } catch (timeout: XCUITestServerError.OperationTimeout) {
             throw IOSDeviceErrors.OperationTimeout(timeout.errorResponse)
         } catch (unreachable: XCUITestServerError.Unreachable) {
@@ -247,8 +263,27 @@ class XCTestIOSDevice(
 
     companion object {
         private val allPermissions = listOf(
-            "notifications"
+            "notifications",
+            "location",
+            "bluetooth",
+            "camera",
+            "microphone",
+            "photos",
+            "contacts",
+            "calendar",
+            "reminders",
+            "speech",
+            "motion",
+            "homekit",
+            "medialibrary",
+            "siri",
+            "usertracking",
+            "localnetwork"
         )
+
+        // Retry configuration for "app not running" errors (slow app startup)
+        private const val APP_NOT_RUNNING_MAX_RETRIES = 5
+        private const val APP_NOT_RUNNING_RETRY_DELAY_MS = 1000L
     }
 
 }

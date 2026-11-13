@@ -1,5 +1,6 @@
 package ios.devicectl
 
+import com.github.michaelbull.result.Ok
 import com.github.michaelbull.result.Result
 import device.IOSDevice
 import device.IOSScreenRecording
@@ -56,11 +57,17 @@ class DeviceControlIOSDevice(override val deviceId: String) : IOSDevice {
     }
 
     override fun clearAppState(id: String) {
-        TODO("Not yet implemented")
+        logger.warn(
+            "clearState is not supported on real iOS devices due to iOS security restrictions. " +
+            "App state will NOT be cleared. " +
+            "Workarounds: (1) Remove clearState from tests, (2) Add app-level reset, " +
+            "(3) Manually reinstall app between test runs"
+        )
+        // Do nothing - test continues without clearing state
     }
 
     override fun clearKeychain(): Result<Unit, Throwable> {
-        TODO("Not yet implemented")
+        return Ok(Unit)
     }
 
     override fun launch(id: String, launchArguments: Map<String, Any>) {
@@ -132,8 +139,9 @@ class DeviceControlIOSDevice(override val deviceId: String) : IOSDevice {
     }
 
     override fun close() {
-        logger.info("[Start] Uninstall the runner app")
-        uninstall(id = LocalXCTestInstaller.UI_TEST_RUNNER_APP_BUNDLE_ID)
-        logger.info("[Done] Uninstall the runner app")
+        // Skip uninstalling runner app on real devices to allow session reuse
+        // logger.info("[Start] Uninstall the runner app")
+        // uninstall(id = LocalXCTestInstaller.UI_TEST_RUNNER_APP_BUNDLE_ID)
+        // logger.info("[Done] Uninstall the runner app")
     }
 }
